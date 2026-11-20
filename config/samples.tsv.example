@@ -1,0 +1,3 @@
+label	sample_id	sex	raw_dir	snp_indel_vcf	cnv_vcf	sv_vcf
+partner_a	SAMPLE_M	M	/mnt/c/path/to/DNA Reports/PartnerA/Raw Data	sampleA.snp-indel.genome.vcf	sampleA.cnv.vcf	sampleA.sv.vcf
+partner_b	SAMPLE_F	F	/mnt/c/path/to/DNA Reports/PartnerB	sampleB.snp-indel.genome.vcf	sampleB.cnv.vcf	sampleB.sv.vcf
