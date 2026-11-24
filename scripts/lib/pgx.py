@@ -2,9 +2,119 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .genomics import normalize_gt_unphased
+
+# CPIC 2019 consensus CYP2D6 allele activity values (PharmVar / CPIC)
+_CYP2D6_ALLELE_AV: dict[str, float] = {
+    # Normal function (1.0)
+    "*1": 1.0, "*2": 1.0, "*27": 1.0, "*33": 1.0, "*34": 1.0,
+    "*35": 1.0, "*39": 1.0, "*45": 1.0, "*46": 1.0, "*48": 1.0, "*53": 1.0,
+    # Decreased function (0.5, except *10 = 0.25 per CPIC 2019 consensus)
+    "*9": 0.5, "*10": 0.25, "*14": 0.5, "*17": 0.5, "*29": 0.5,
+    "*41": 0.5, "*49": 0.5, "*50": 0.5, "*54": 0.5, "*55": 0.5, "*59": 0.5,
+    # No function (0.0)
+    "*3": 0.0, "*4": 0.0, "*5": 0.0, "*6": 0.0, "*7": 0.0, "*8": 0.0,
+    "*11": 0.0, "*12": 0.0, "*13": 0.0, "*15": 0.0, "*18": 0.0, "*19": 0.0,
+    "*20": 0.0, "*21": 0.0, "*31": 0.0, "*36": 0.0, "*38": 0.0, "*40": 0.0,
+    "*42": 0.0, "*44": 0.0, "*47": 0.0, "*51": 0.0, "*56": 0.0, "*57": 0.0,
+    "*62": 0.0, "*68": 0.0, "*69": 0.0, "*92": 0.0, "*99": 0.0, "*100": 0.0,
+    "*101": 0.0, "*114": 0.0,
+}
+
+
+def _cyp2d6_haplotype_av(hap: str) -> float | None:
+    """Compute CPIC activity value for a single CYP2D6 haplotype (handles tandems '+' and copies 'xN')."""
+    total = 0.0
+    for part in hap.strip().split("+"):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^(\*\d+)(?:x(\d+))?$", part)
+        if not m:
+            return None
+        star, mult_s = m.group(1), m.group(2)
+        if star not in _CYP2D6_ALLELE_AV:
+            return None
+        mult = int(mult_s) if mult_s else 1
+        total += _CYP2D6_ALLELE_AV[star] * mult
+    return total
+
+
+def interpret_cyp2d6_cyrius(
+    genotype: str | None,
+    filter_status: str | None = None,
+) -> dict[str, Any]:
+    """Map a Cyrius BAM-based CYP2D6 call to CPIC Activity Score, phenotype, tier, and guidance."""
+    drugs = "Codeine, tramadol, tamoxifen, TCAs (amitriptyline/nortriptyline), SSRIs (paroxetine/fluoxetine), ondansetron"
+    gt = (genotype or "").strip()
+    flt = (filter_status or "").strip()
+    if not gt or gt.lower() in ("none", "no_call", ".") or (flt and flt.upper() != "PASS"):
+        return {
+            "gene": "CYP2D6",
+            "diplotype": f"{gt or 'No call'} (Cyrius {flt or 'uncalled'})",
+            "phenotype": "Indeterminate (BAM Cyrius)",
+            "tier": "INCOMPLETE",
+            "drugs": drugs,
+            "guidance": "Cyrius could not unambiguously resolve CYP2D6 from BAM; confirm via clinical PGx assay before prescribing CYP2D6 substrates.",
+            "activity_score": None,
+            "source": "BAM_CYRIUS",
+        }
+
+    # Handle multi-option calls separated by ';' by evaluating the first if identical AS, else flagging
+    options = [opt.strip() for opt in gt.split(";") if opt.strip()]
+    scores: list[float | None] = []
+    for opt in options:
+        if "/" in opt:
+            haps = opt.split("/")
+            avs = [_cyp2d6_haplotype_av(h) for h in haps]
+            scores.append(sum(avs) if all(v is not None for v in avs) else None)
+        else:
+            scores.append(_cyp2d6_haplotype_av(opt))
+
+    valid_scores = [s for s in scores if s is not None]
+    if not valid_scores or len(set(valid_scores)) > 1:
+        return {
+            "gene": "CYP2D6",
+            "diplotype": f"{gt} (BAM Cyrius)",
+            "phenotype": "Indeterminate / Uncertain Function",
+            "tier": "MODERATE",
+            "drugs": drugs,
+            "guidance": "Cyrius resolved star alleles from BAM, but activity score is ambiguous or includes an uncurated allele; confirm clinically.",
+            "activity_score": None,
+            "source": "BAM_CYRIUS",
+        }
+
+    as_val = valid_scores[0]
+    if as_val == 0.0:
+        pheno = f"Poor Metabolizer (PM, AS={as_val:g})"
+        tier = "ACTIONABLE"
+        guidance = "Avoid codeine and tramadol (lack of analgesic efficacy); avoid or use alternative to tamoxifen; reduce TCA starting dose by 50% or use alternative per CPIC."
+    elif as_val <= 1.0:
+        pheno = f"Intermediate Metabolizer (IM, AS={as_val:g})"
+        tier = "ACTIONABLE"
+        guidance = "Reduced CYP2D6 metabolism (CPIC 2019 consensus): use codeine/tramadol with caution (monitor efficacy) and consider 25% dose reduction for TCAs / alternative to tamoxifen if clinically indicated."
+    elif as_val <= 2.25:
+        pheno = f"Normal Metabolizer (NM, AS={as_val:g})"
+        tier = "NORMAL"
+        guidance = "Standard CPIC dosing for codeine, tramadol, tamoxifen, TCAs, SSRIs, and ondansetron (CNVs and CYP2D7 hybrids screened via BAM Cyrius)."
+    else:
+        pheno = f"Ultrarapid Metabolizer (UM, AS={as_val:g})"
+        tier = "ACTIONABLE"
+        guidance = "CRITICAL SAFETY ALERT: Avoid codeine and tramadol (life-threatening opioid toxicity risk from rapid morphine/O-desmethyltramadol formation); avoid TCAs or use alternative per CPIC."
+
+    return {
+        "gene": "CYP2D6",
+        "diplotype": f"{gt} (BAM Cyrius)",
+        "phenotype": pheno,
+        "tier": tier,
+        "drugs": drugs,
+        "guidance": guidance,
+        "activity_score": as_val,
+        "source": "BAM_CYRIUS",
+    }
 
 
 def _alt_dosage(row: dict[str, Any] | None) -> int | None:
@@ -24,7 +134,10 @@ def _alt_dosage(row: dict[str, Any] | None) -> int | None:
     return None
 
 
-def interpret_pgx_profile(marker_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def interpret_pgx_profile(
+    marker_rows: list[dict[str, Any]],
+    cyrius_cyp2d6: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """
     Map targeted PGx marker rows (from 07_deep_analysis.py) into structured CPIC
     diplotype, phenotype, actionability tier, affected drug classes, and clinical notes.
@@ -382,25 +495,44 @@ def interpret_pgx_profile(marker_rows: list[dict[str, Any]]) -> list[dict[str, A
                 "guidance": "Standard anesthesia risk for tested variants.",
             })
 
-    # 11. CYP2D6 (*4 only — explicitly marked PARTIAL until BAM Cyrius/Aldy)
-    d_2d6 = _d("rs3892097")
-    if d_2d6 is not None:
-        if d_2d6 >= 1:
-            dip_2d6 = "*4/*4 (partial)" if d_2d6 == 2 else "*1/*4 (partial)"
-            pheno_2d6 = "Poor Metabolizer (at least)" if d_2d6 == 2 else "At least Intermediate Metabolizer"
-            results.append({
-                "gene": "CYP2D6", "diplotype": dip_2d6, "phenotype": pheno_2d6,
-                "tier": "ACTIONABLE",
-                "drugs": "Codeine, tramadol, tamoxifen, TCAs (amitriptyline/nortriptyline), SSRIs (paroxetine/fluoxetine), ondansetron",
-                "guidance": "Carries non-functional *4 allele (avoid codeine/tramadol if PM; confirm full star-allele/CNV/hybrid status via BAM Cyrius/Aldy or clinical PGx).",
-            })
-        else:
-            results.append({
-                "gene": "CYP2D6", "diplotype": "*4 Negative (CNVs/hybrids unassessed)",
-                "phenotype": "Partial — Needs BAM/Clinical PGx", "tier": "PARTIAL",
-                "drugs": "Codeine, tramadol, tamoxifen, TCAs, SSRIs, ondansetron",
-                "guidance": "Negative for *4, but standard VCFs cannot detect *5 whole-gene deletion, duplications (UM), or CYP2D7 hybrids. Will resolve once BAM/CRAM is added.",
-            })
+    # 11. CYP2D6 — use BAM-based Cyrius call if resolved (PASS), else preserve VCF *4 call + note Cyrius no-call
+    cyrius_resolved = (
+        cyrius_cyp2d6
+        and cyrius_cyp2d6.get("status") == "OK"
+        and str(cyrius_cyp2d6.get("genotype") or "").strip() not in ("", "None", "No_call", ".")
+        and str(cyrius_cyp2d6.get("filter") or "").strip().upper() == "PASS"
+    )
+    if cyrius_resolved:
+        results.append(
+            interpret_cyp2d6_cyrius(
+                cyrius_cyp2d6.get("genotype"),
+                cyrius_cyp2d6.get("filter"),
+            )
+        )
+    else:
+        cyrius_note = ""
+        if cyrius_cyp2d6 and cyrius_cyp2d6.get("status") == "OK":
+            raw_cn = cyrius_cyp2d6.get("total_cn_raw")
+            cn_txt = f", Total_CN_raw={raw_cn}" if raw_cn is not None else ""
+            cyrius_note = f" (BAM Cyrius returned no-call{cn_txt}; confirm CNVs/hybrids clinically)"
+        d_2d6 = _d("rs3892097")
+        if d_2d6 is not None:
+            if d_2d6 >= 1:
+                dip_2d6 = "*4/*4 (partial)" if d_2d6 == 2 else "*1/*4 (partial)"
+                pheno_2d6 = "Poor Metabolizer (at least)" if d_2d6 == 2 else "At least Intermediate Metabolizer"
+                results.append({
+                    "gene": "CYP2D6", "diplotype": dip_2d6, "phenotype": pheno_2d6,
+                    "tier": "ACTIONABLE",
+                    "drugs": "Codeine, tramadol, tamoxifen, TCAs (amitriptyline/nortriptyline), SSRIs (paroxetine/fluoxetine), ondansetron",
+                    "guidance": f"Carries non-functional *4 allele{cyrius_note or ' (avoid codeine/tramadol if PM; confirm full star-allele/CNV/hybrid status via BAM Cyrius/Aldy or clinical PGx)'}.",
+                })
+            else:
+                results.append({
+                    "gene": "CYP2D6", "diplotype": "*4 Negative (CNVs/hybrids unassessed)",
+                    "phenotype": "Partial — Needs Clinical PGx", "tier": "PARTIAL",
+                    "drugs": "Codeine, tramadol, tamoxifen, TCAs, SSRIs, ondansetron",
+                    "guidance": f"Negative for *4{cyrius_note or ', but standard VCFs cannot detect *5 whole-gene deletion, duplications (UM), or CYP2D7 hybrids'}.",
+                })
 
     tier_order = {"ACTIONABLE": 0, "MODERATE": 1, "PARTIAL": 2, "INCOMPLETE": 3, "NORMAL": 4}
     results.sort(key=lambda r: (tier_order.get(r["tier"], 9), r["gene"]))
@@ -451,10 +583,20 @@ def render_pgx_medication_card(
             f"{e['drugs']} | {e['guidance']} |"
         )
 
+    cyp2d6_bam_resolved = any(
+        e.get("gene") == "CYP2D6" and e.get("source") == "BAM_CYRIUS"
+        for e in pgx_entries
+    )
+    cyp2d6_limitation = (
+        "- ***CYP2D6* structural alleles (BAM-resolved via Cyrius):** Full star-allele diplotype, whole-gene deletions (`*5`), duplications, and *CYP2D7* hybrids were called directly from the 30x WGS BAM via Illumina `Cyrius` (research-grade; confirm clinically before changing prescriptions)."
+        if cyp2d6_bam_resolved
+        else "- ***CYP2D6* structural alleles:** Standard VCFs detect `*4` (`rs3892097`) but cannot reliably call whole-gene deletions (`*5`), gene duplications (ultrarapid metabolizers), or *CYP2D7* hybrids. Uploading BAM/CRAM files unlocks `Cyrius`/`Aldy`."
+    )
+
     md.extend([
         "",
-        "## 3. Known Short-Read VCF Pharmacogenomics Limitations",
-        "- ***CYP2D6* structural alleles:** Standard VCFs detect `*4` (`rs3892097`) but cannot reliably call whole-gene deletions (`*5`), gene duplications (ultrarapid metabolizers), or *CYP2D7* hybrids. Uploading BAM/CRAM files unlocks `Cyrius`/`Aldy`.",
+        "## 3. Known Short-Read Pharmacogenomics Limitations",
+        cyp2d6_limitation,
         "- ***UGT1A1\\*28* TA-repeat:** Promoter `(TA)7` repeat expansion is not reliably called in standard short-read SNV VCFs.",
         "- ***HLA-A* / *HLA-B* drug hypersensitivity:** Severe hypersensitivity alleles (`HLA-B*57:01` abacavir, `HLA-B*15:02` carbamazepine, `HLA-B*58:01` allopurinol) require dedicated HLA typing on BAM/CRAM reads or clinical HLA testing.",
         "- **Rare non-panel alleles:** A `Normal` call confirms reference (`0/0`) at the major CPIC defining loci, not absence of ultra-rare private variants.",

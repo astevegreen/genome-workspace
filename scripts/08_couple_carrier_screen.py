@@ -184,6 +184,30 @@ def scan_partner_gene_for_rare_coding_variants(
     return rare_protein_altering
 
 
+def _load_bam_summary(rep_dir: Path) -> dict[str, Any] | None:
+    p = rep_dir / "bam_blind_spots.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _sv_bam_verdict_by_gene(bam_data: dict[str, Any] | None) -> dict[str, list[str]]:
+    """Map gene -> list of concise BAM SV verification strings (e.g. 'DEL ratio=0.01 CONFIRMED_HOM_DEL')."""
+    out: dict[str, list[str]] = defaultdict(list)
+    if not bam_data:
+        return out
+    for s in bam_data.get("sv_verification") or []:
+        desc = f"{s['svtype']} ratio={s['depth_ratio']:.2f} ({s['bam_verdict']})"
+        for g in str(s.get("cds_genes") or "").split(","):
+            g = g.strip()
+            if g:
+                out[g].append(desc)
+    return out
+
+
 def render_plain_language_summary(
     male_lbl: str,
     fem_lbl: str,
@@ -198,6 +222,8 @@ def render_plain_language_summary(
     novel_acmg_lofs: list[dict[str, Any]],
     filtered_artifacts: list[dict[str, Any]],
     tm_merged: pd.DataFrame,
+    male_bam: dict[str, Any] | None = None,
+    fem_bam: dict[str, Any] | None = None,
 ) -> str:
     """Auto-generate a clear, jargon-light summary synced to the live pipeline outputs."""
     m_name, f_name = male_lbl.title(), fem_lbl.title()
@@ -237,14 +263,25 @@ def render_plain_language_summary(
     else:
         md.append(f"Summary of the joint comparison between {m_name}'s and {f_name}'s whole-genome sequences:")
 
+    has_bam = bool(male_bam or fem_bam)
+    bam_exec_note = (
+        "5. **BAM-Resolved Blind Spots & Remaining Clinical Follow-Up:** Specialized BAM callers (**ExpansionHunter**, **SMNCopyNumberCaller**, **Cyrius**) have now been run on both 30x WGS alignments for **Fragile X (*FMR1*)**, **SMA (*SMN1*/*SMN2*)**, **repeat expansions**, and **full *CYP2D6* star alleles/CNVs/hybrids** (see Section 3 & Section 5). Three high-homology blind spots still require a clinical carrier panel (**Alpha-Thalassemia**, **CAH**, and **Gaucher**), and any BAM-based reproductive/PGx finding should still be confirmed clinically."
+        if has_bam
+        else "5. **Recommended Clinical Follow-Up:** Even 30x whole-genome sequencing has five well-known short-read blind spots (**Fragile X**, **SMA**, **Alpha-Thalassemia**, **CAH**, and **Gaucher**). Standard clinical carrier screening covers these gaps; uploading BAM/CRAM alignment files in the future will also unlock local callers for several of them."
+    )
+    sv_exec_note = (
+        f"*(Additionally, {len(shared_sv_only)} gene(s) had shared short-read structural variant calls—{len(shared_sv_only) - len(non_poly_shared_svs)} in known common/HLA regions and {len(non_poly_shared_svs)} in other loci; all have now been audited for read-level depth/breakpoint support in the technical couple report.)*"
+        if has_bam
+        else f"*(Additionally, {len(shared_sv_only)} gene(s) had shared short-read structural variant calls—{len(shared_sv_only) - len(non_poly_shared_svs)} in known common/HLA regions and {len(non_poly_shared_svs)} in other loci, documented transparently in the technical couple report for future BAM/IGV verification.)*"
+    )
+
     md.extend([
         "",
-        f"1. **Shared Recessive Disease Genes (25% Offspring Risk):** **{len(shared_snv_matches)}** shared SNV/indel or SNV+SV carrier gene(s) found. "
-        f"*(Additionally, {len(shared_sv_only)} gene(s) had shared short-read structural variant calls—{len(shared_sv_only) - len(non_poly_shared_svs)} in known common/HLA regions and {len(non_poly_shared_svs)} in other loci, documented transparently in the technical couple report for future BAM/IGV verification.)*",
+        f"1. **Shared Recessive Disease Genes (25% Offspring Risk):** **{len(shared_snv_matches)}** shared SNV/indel or SNV+SV carrier gene(s) found. {sv_exec_note}",
         f"2. **Maternal X-Linked & Mitochondrial Screening ({f_name}):** **{len(maternal_x_snv)}** X-linked SNV/indel(s), **{len(maternal_x_sv)}** X-linked exonic SV(s), and **{len(maternal_mt_snv)}** mitochondrial disease variant(s) found.",
         f"3. **Medically Actionable ACMG SF {ACMG_SF_VERSION} ({len(ACMG_SF_GENES)} Genes) & Dominant Conditions:** **{len(ad_acmg_hits)}** ClinVar/conflicting hit(s) and **{len(novel_acmg_lofs)}** unreported rare loss-of-function candidate(s) found across both partners.",
         f"4. **Automatic False-Alarm Filtering:** **{len(filtered_artifacts)}** common sequencing artifact(s) / benign blood-group / legacy 0-star entries were automatically flagged and moved to Section 4 so they don't cause false alarm.",
-        "5. **Recommended Clinical Follow-Up:** Even 30x whole-genome sequencing has five well-known short-read blind spots (**Fragile X**, **SMA**, **Alpha-Thalassemia**, **CAH**, and **Gaucher**). Standard clinical carrier screening covers these gaps; uploading BAM/CRAM alignment files in the future will also unlock local callers for several of them.",
+        bam_exec_note,
         "",
         "---",
         "",
@@ -345,14 +382,70 @@ def render_plain_language_summary(
         "",
         "---",
         "",
-        "## 5. Known Blind Spots & Next Steps",
+        "## 5. BAM-Resolved Blind Spots & Remaining Next Steps",
         "",
-        "Short-read 30x WGS cannot reliably clear these five high-priority reproductive genes without clinical testing (or specialized BAM/CRAM callers once raw alignments are uploaded):",
-        f"- **Fragile X (*FMR1*):** CGG repeat expansion — clinical test recommended for **{f_name}** (or ExpansionHunter once BAM/CRAM is available, with clinical confirmation).",
-        "- **Spinal Muscular Atrophy (*SMN1*):** Exon 7 copy number & `2+0` silent carriers — clinical test recommended for **both partners** (or SMNCopyNumberCaller on BAM/CRAM).",
-        "- **Alpha-Thalassemia (*HBA1/HBA2*):** Common 3.7 kb / 4.2 kb deletions — clinical test recommended for **both partners**.",
-        "- **Congenital Adrenal Hyperplasia (*CYP21A2*) & Gaucher Disease (*GBA1*):** Pseudogene homology interferes with short-read calling — clinical panel recommended for **both partners**.",
-        "- **Pharmacogenomics (*CYP2D6*):** Standard VCFs detect `*4` (`rs3892097`) but cannot detect whole-gene deletions/duplications or *CYP2D7* hybrids; once BAM/CRAM files are added, Cyrius/Aldy can resolve full *CYP2D6* star alleles.",
+    ])
+    if has_bam:
+        def _fmt_smn(b: dict[str, Any] | None) -> str:
+            if not b or b.get("smn", {}).get("status") != "OK":
+                return "Not run"
+            s = b["smn"]
+            return f"SMN1 CN={s['smn1_cn']}, SMN2 CN={s['smn2_cn']}, isCarrier={s['is_carrier']} ({s['interpretation']})"
+
+        def _fmt_fmr1(b: dict[str, Any] | None) -> str:
+            if not b or b.get("expansion_hunter", {}).get("status") != "OK":
+                return "Not run"
+            fmr1 = b["expansion_hunter"].get("fmr1")
+            if not fmr1:
+                return "Not called"
+            return f"`{fmr1['genotype']}` CGG repeats (CI `{fmr1['ci']}` — **{fmr1['classification']}**)"
+
+        def _fmt_repeats(b: dict[str, Any] | None) -> str:
+            if not b or b.get("expansion_hunter", {}).get("status") != "OK":
+                return "Not run"
+            eh = b["expansion_hunter"]
+            if eh["n_flagged"] == 0:
+                return f"All {eh['n_loci']} loci normal (*HTT*, *C9ORF72*, *DMPK*, *FXN*, *ATXN*)"
+            fl = ", ".join(f"{r['locus']} `{r['genotype']}` ({r['classification']})" for r in eh["flagged"])
+            return f"{eh['n_flagged']}/{eh['n_loci']} flagged: {fl}"
+
+        def _fmt_cyp2d6(b: dict[str, Any] | None) -> str:
+            if not b or b.get("cyrius_cyp2d6", {}).get("status") != "OK":
+                return "Not run"
+            c = b["cyrius_cyp2d6"]
+            gt = str(c.get("genotype") or "").strip()
+            if not gt or gt.lower() == "none":
+                raw_cn = c.get("total_cn_raw")
+                cn_txt = f"Total_CN_raw={raw_cn}" if raw_cn is not None else "borderline CN"
+                return f"Cyrius no-call ({cn_txt}; confirm exact CN/hybrids clinically)"
+            return f"`{gt}` ({c['filter']}) — **{c['cpic_phenotype']}**"
+
+        md.extend([
+            "The following former VCF blind spots have now been directly screened using the raw 30x WGS BAM alignments (research-grade; confirm clinically before reproductive or prescribing decisions):",
+            "",
+            f"| Blind-Spot Assay | {m_name} | {f_name} |",
+            "|---|---|---|",
+            f"| **Fragile X (*FMR1* CGG Repeats)** | {_fmt_fmr1(male_bam)} | {_fmt_fmr1(fem_bam)} |",
+            f"| **Other Repeat Expansions (31 Loci)** | {_fmt_repeats(male_bam)} | {_fmt_repeats(fem_bam)} |",
+            f"| **SMA (*SMN1*/*SMN2* Exon 7 & 2+0)** | {_fmt_smn(male_bam)} | {_fmt_smn(fem_bam)} |",
+            f"| ***CYP2D6* Full Star Alleles / CNVs** | {_fmt_cyp2d6(male_bam)} | {_fmt_cyp2d6(fem_bam)} |",
+            "",
+            "### Still Unscreened by Short-Read 30x WGS (Recommend Clinical Carrier Panel)",
+            "- **Alpha-Thalassemia (*HBA1/HBA2*):** Common 3.7 kb / 4.2 kb deletions — clinical test recommended for **both partners**.",
+            "- **Congenital Adrenal Hyperplasia (*CYP21A2*) & Gaucher Disease (*GBA1*):** Pseudogene homology interferes with short-read calling — clinical panel recommended for **both partners**.",
+            "- **Clinical Confirmation:** Even with BAM-based *FMR1*, *SMN1*, and *CYP2D6* callers, standard CLIA-certified carrier screening / PGx testing is recommended prior to reproductive or medication changes.",
+        ])
+    else:
+        md.extend([
+            "Short-read 30x WGS cannot reliably clear these five high-priority reproductive genes without clinical testing (or specialized BAM/CRAM callers once raw alignments are uploaded):",
+            f"- **Fragile X (*FMR1*):** CGG repeat expansion — clinical test recommended for **{f_name}** (or ExpansionHunter once BAM/CRAM is available, with clinical confirmation).",
+            "- **Spinal Muscular Atrophy (*SMN1*):** Exon 7 copy number & `2+0` silent carriers — clinical test recommended for **both partners** (or SMNCopyNumberCaller on BAM/CRAM).",
+            "- **Alpha-Thalassemia (*HBA1/HBA2*):** Common 3.7 kb / 4.2 kb deletions — clinical test recommended for **both partners**.",
+            "- **Congenital Adrenal Hyperplasia (*CYP21A2*) & Gaucher Disease (*GBA1*):** Pseudogene homology interferes with short-read calling — clinical panel recommended for **both partners**.",
+            "- **Pharmacogenomics (*CYP2D6*):** Standard VCFs detect `*4` (`rs3892097`) but cannot detect whole-gene deletions/duplications or *CYP2D7* hybrids; once BAM/CRAM files are added, Cyrius/Aldy can resolve full *CYP2D6* star alleles.",
+        ])
+
+    md.extend([
         "",
         "### Annual Checkup Workflow",
         "To refresh this entire analysis once a year with the latest ClinVar & GenCC clinical databases, run:",
@@ -367,6 +460,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Joint couple reproductive carrier screening.")
     parser.add_argument("--male", required=True, help="Male partner label from config/samples.tsv (e.g. partner_a)")
     parser.add_argument("--female", required=True, help="Female partner label from config/samples.tsv (e.g. partner_b)")
+    parser.add_argument(
+        "--from-existing-json",
+        action="store_true",
+        help="Re-render couple reports from existing couple_carrier_screen.json + fresh BAM blind-spot JSONs (when data/processed VCFs are not present).",
+    )
     args = parser.parse_args()
 
     male_lbl, fem_lbl = args.male, args.female
@@ -378,154 +476,176 @@ def main() -> None:
     male_rep = REPO_ROOT / "results" / "reports" / male_lbl
     fem_rep = REPO_ROOT / "results" / "reports" / fem_lbl
 
-    ref_meta = get_reference_metadata(REFERENCE_DIR)
-    api = CachedAnnotationClient(REFERENCE_DIR / "api_cache.json")
+    male_bam = _load_bam_summary(male_rep)
+    fem_bam = _load_bam_summary(fem_rep)
 
-    print(f"[Couple] Running sex concordance QC ({male_lbl}=M, {fem_lbl}=F)...")
-    sex_qc = {
-        male_lbl: check_sex_qc(male_proc / "snp_indel.variants.norm.vcf.gz", "M"),
-        fem_lbl: check_sex_qc(fem_proc / "snp_indel.variants.norm.vcf.gz", "F"),
-    }
+    existing_json = out_dir / "couple_carrier_screen.json"
+    if args.from_existing_json and existing_json.exists():
+        print(f"[Couple] Loading existing couple JSON ({existing_json}) and merging BAM blind-spot findings...")
+        prev = json.loads(existing_json.read_text(encoding="utf-8"))
+        ref_meta = prev["reference_metadata"]
+        import datetime as _dt
+        ref_meta["run_date"] = _dt.date.today().isoformat()
+        sex_qc = prev["sex_qc"]
+        shared_clinical_matches = prev["shared_clinical_matches"]
+        shared_sv_only_matches = prev["shared_sv_only_matches"]
+        partner_rescue_rows = prev["partner_rescue"]
+        maternal_x_snv = prev["maternal_x_snv"]
+        maternal_x_sv = prev["maternal_x_sv"]
+        maternal_mt_snv = prev["maternal_mt_snv"]
+        ad_acmg_hits = prev["ad_acmg_hits"]
+        novel_acmg_lofs = prev["novel_acmg_lofs"]
+        filtered_artifacts = prev["filtered_artifacts"]
+        tm_merged = pd.read_csv(out_dir / "couple_targeted_markers.tsv", sep="\t")
+    else:
+        ref_meta = get_reference_metadata(REFERENCE_DIR)
+        api = CachedAnnotationClient(REFERENCE_DIR / "api_cache.json")
 
-    print("[Couple] Loading per-partner clinical hits & exonic CNV/SV overlaps...")
-    male_hits, male_artifacts, male_novel_lofs = collect_partner_clinical_hits(
-        male_rep / "carrier_screen_enriched.json"
-    )
-    fem_hits, fem_artifacts, fem_novel_lofs = collect_partner_clinical_hits(
-        fem_rep / "carrier_screen_enriched.json"
-    )
-    male_sv = pd.read_csv(male_rep / "cnv_sv_exonic_clinical.tsv", sep="\t")
-    fem_sv = pd.read_csv(fem_rep / "cnv_sv_exonic_clinical.tsv", sep="\t")
-
-    _, cds_by_gene = load_gencode_cds(REFERENCE_DIR / "gencode.v46.cds.nochr.bed.gz")
-
-    # 1. Gene-level matching (explicitly separating SNV/indel matches from SV+SV-only overlaps!)
-    male_by_gene: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    fem_by_gene: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for h in male_hits:
-        if h["gene"]:
-            male_by_gene[h["gene"]].append(h)
-    for h in fem_hits:
-        if h["gene"]:
-            fem_by_gene[h["gene"]].append(h)
-
-    def sv_gene_map(df: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
-        m: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        if df.empty:
-            return m
-        for _, r in df.iterrows():
-            for g in str(r.get("cds_genes", "")).replace("...", "").split(","):
-                g = g.strip()
-                if g:
-                    m[g].append(r.to_dict())
-        return m
-
-    male_sv_genes = sv_gene_map(male_sv)
-    fem_sv_genes = sv_gene_map(fem_sv)
-
-    all_shared_genes = sorted(
-        (set(male_by_gene) | set(male_sv_genes)) & (set(fem_by_gene) | set(fem_sv_genes))
-    )
-    shared_clinical_matches: list[dict[str, Any]] = []
-    shared_sv_only_matches: list[dict[str, Any]] = []
-    for g in all_shared_genes:
-        entry = {
-            "gene": g,
-            f"{male_lbl}_snv": male_by_gene.get(g, []),
-            f"{fem_lbl}_snv": fem_by_gene.get(g, []),
-            f"{male_lbl}_sv": male_sv_genes.get(g, []),
-            f"{fem_lbl}_sv": fem_sv_genes.get(g, []),
+        print(f"[Couple] Running sex concordance QC ({male_lbl}=M, {fem_lbl}=F)...")
+        sex_qc = {
+            male_lbl: check_sex_qc(male_proc / "snp_indel.variants.norm.vcf.gz", "M"),
+            fem_lbl: check_sex_qc(fem_proc / "snp_indel.variants.norm.vcf.gz", "F"),
         }
-        if g in male_by_gene or g in fem_by_gene:
-            shared_clinical_matches.append(entry)
-        else:
-            entry["is_known_polymorphic"] = g in KNOWN_POLYMORPHIC_SV_GENES
-            entry["note"] = KNOWN_POLYMORPHIC_SV_GENES.get(
-                g, "Shared short-read exonic SV call; verify in BAM/IGV or population SV database (gnomAD-SV)"
-            )
-            shared_sv_only_matches.append(entry)
 
-    # 2. Partner-Gene Rare/Novel Coding Rescue & Strict PASS+MinDP Reciprocal gVCF Coverage Audit
-    print("[Couple] Scanning partner genomes for rare/novel coding variants & PASS gVCF coverage...")
-    partner_rescue_rows: list[dict[str, Any]] = []
-    carrier_gene_pairs: list[tuple[str, str, dict[str, Any]]] = []
-    for h in male_hits:
-        if h["gene"] and h["chrom"] not in ("X", "Y", "MT"):
-            carrier_gene_pairs.append((male_lbl, fem_lbl, h))
-    for h in fem_hits:
-        if h["gene"] and h["chrom"] not in ("X", "Y", "MT"):
-            carrier_gene_pairs.append((fem_lbl, male_lbl, h))
+        print("[Couple] Loading per-partner clinical hits & exonic CNV/SV overlaps...")
+        male_hits, male_artifacts, male_novel_lofs = collect_partner_clinical_hits(
+            male_rep / "carrier_screen_enriched.json"
+        )
+        fem_hits, fem_artifacts, fem_novel_lofs = collect_partner_clinical_hits(
+            fem_rep / "carrier_screen_enriched.json"
+        )
+        male_sv = pd.read_csv(male_rep / "cnv_sv_exonic_clinical.tsv", sep="\t")
+        fem_sv = pd.read_csv(fem_rep / "cnv_sv_exonic_clinical.tsv", sep="\t")
 
-    checked_gene_partner: set[tuple[str, str]] = set()
-    with pysam.VariantFile(str(male_proc / "snp_indel.genome.vcf.gz")) as male_gvf, \
-         pysam.VariantFile(str(fem_proc / "snp_indel.genome.vcf.gz")) as fem_gvf:
-        for carrier_lbl, partner_lbl, hit in carrier_gene_pairs:
-            gene = hit["gene"]
-            if (gene, partner_lbl) in checked_gene_partner:
-                continue
-            checked_gene_partner.add((gene, partner_lbl))
-            cds_entry = cds_by_gene.get(gene)
-            if not cds_entry:
-                continue
-            chrom, exons = cds_entry
-            partner_proc = male_proc if partner_lbl == male_lbl else fem_proc
-            partner_gvf = male_gvf if partner_lbl == male_lbl else fem_gvf
-            cov = compute_gene_gvcf_coverage(partner_gvf, chrom, exons, min_pass_dp=10)
-            rare_vars = scan_partner_gene_for_rare_coding_variants(
-                partner_proc / "snp_indel.variants.norm.vcf.gz", gene, chrom, exons, api
-            )
-            partner_svs = (male_sv_genes if partner_lbl == male_lbl else fem_sv_genes).get(gene, [])
-            partner_rescue_rows.append({
-                "carrier_partner": carrier_lbl,
-                "checked_partner": partner_lbl,
-                "gene": gene,
-                "moi": hit["moi"],
-                "carrier_variant": hit["variant_id"],
-                "carrier_rsid": hit["rsid"],
-                "carrier_evidence": f"{hit['evidence_tier']} ({hit['clnsig']})",
-                "partner_cds_bp": cov["cds_bp"],
-                "partner_pct_ge_10x": cov["pct_ge_10x"],
-                "partner_rare_coding_count": len(rare_vars),
-                "partner_rare_coding_variants": rare_vars,
-                "partner_exonic_sv_count": len(partner_svs),
-            })
-    api.save()
+        _, cds_by_gene = load_gencode_cds(REFERENCE_DIR / "gencode.v46.cds.nochr.bed.gz")
 
-    # 3. Maternal X-linked & Mitochondrial screening
-    maternal_x_snv = [h for h in fem_hits if h["chrom"] == "X"]
-    maternal_mt_snv = [h for h in fem_hits if h["chrom"] == "MT"]
-    maternal_x_sv = fem_sv[fem_sv["chrom"].astype(str) == "X"].to_dict("records") if not fem_sv.empty else []
+        # 1. Gene-level matching (explicitly separating SNV/indel matches from SV+SV-only overlaps!)
+        male_by_gene: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        fem_by_gene: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for h in male_hits:
+            if h["gene"]:
+                male_by_gene[h["gene"]].append(h)
+        for h in fem_hits:
+            if h["gene"]:
+                fem_by_gene[h["gene"]].append(h)
 
-    # 4. Autosomal Dominant (AD / AD-AR) & ACMG SF v3.3 in either partner
-    ad_acmg_hits = []
-    for lbl, lst in ((male_lbl, male_hits), (fem_lbl, fem_hits)):
-        for h in lst:
-            if h.get("acmg_sf") or h["moi"] in ("AD", "AD/AR"):
-                ad_acmg_hits.append({"partner": lbl, **h})
+        def sv_gene_map(df: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
+            m: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            if df.empty:
+                return m
+            for _, r in df.iterrows():
+                for g in str(r.get("cds_genes", "")).replace("...", "").split(","):
+                    g = g.strip()
+                    if g:
+                        m[g].append(r.to_dict())
+            return m
 
-    novel_acmg_lofs = [
-        {"partner": male_lbl, **r} for r in male_novel_lofs
-    ] + [
-        {"partner": fem_lbl, **r} for r in fem_novel_lofs
-    ]
+        male_sv_genes = sv_gene_map(male_sv)
+        fem_sv_genes = sv_gene_map(fem_sv)
 
-    filtered_artifacts = [
-        {"partner": male_lbl, **r} for r in male_artifacts
-    ] + [
-        {"partner": fem_lbl, **r} for r in fem_artifacts
-    ]
+        all_shared_genes = sorted(
+            (set(male_by_gene) | set(male_sv_genes)) & (set(fem_by_gene) | set(fem_sv_genes))
+        )
+        shared_clinical_matches: list[dict[str, Any]] = []
+        shared_sv_only_matches: list[dict[str, Any]] = []
+        for g in all_shared_genes:
+            entry = {
+                "gene": g,
+                f"{male_lbl}_snv": male_by_gene.get(g, []),
+                f"{fem_lbl}_snv": fem_by_gene.get(g, []),
+                f"{male_lbl}_sv": male_sv_genes.get(g, []),
+                f"{fem_lbl}_sv": fem_sv_genes.get(g, []),
+            }
+            if g in male_by_gene or g in fem_by_gene:
+                shared_clinical_matches.append(entry)
+            else:
+                entry["is_known_polymorphic"] = g in KNOWN_POLYMORPHIC_SV_GENES
+                entry["note"] = KNOWN_POLYMORPHIC_SV_GENES.get(
+                    g, "Shared short-read exonic SV call; verify in BAM/IGV or population SV database (gnomAD-SV)"
+                )
+                shared_sv_only_matches.append(entry)
 
-    # 5. Side-by-side canonical markers
-    male_tm = pd.read_csv(male_rep / "targeted_markers.tsv", sep="\t")
-    fem_tm = pd.read_csv(fem_rep / "targeted_markers.tsv", sep="\t")
-    tm_merged = male_tm[["category", "gene", "rsid", "locus", "description", "gt", "dp"]].merge(
-        fem_tm[["rsid", "gt", "dp"]], on="rsid", suffixes=(f"_{male_lbl}", f"_{fem_lbl}")
-    )
+        # 2. Partner-Gene Rare/Novel Coding Rescue & Strict PASS+MinDP Reciprocal gVCF Coverage Audit
+        print("[Couple] Scanning partner genomes for rare/novel coding variants & PASS gVCF coverage...")
+        partner_rescue_rows: list[dict[str, Any]] = []
+        carrier_gene_pairs: list[tuple[str, str, dict[str, Any]]] = []
+        for h in male_hits:
+            if h["gene"] and h["chrom"] not in ("X", "Y", "MT"):
+                carrier_gene_pairs.append((male_lbl, fem_lbl, h))
+        for h in fem_hits:
+            if h["gene"] and h["chrom"] not in ("X", "Y", "MT"):
+                carrier_gene_pairs.append((fem_lbl, male_lbl, h))
 
-    pd.DataFrame(partner_rescue_rows).drop(columns=["partner_rare_coding_variants"], errors="ignore").to_csv(
-        out_dir / "partner_gene_reciprocal_audit.tsv", sep="\t", index=False
-    )
-    tm_merged.to_csv(out_dir / "couple_targeted_markers.tsv", sep="\t", index=False)
+        checked_gene_partner: set[tuple[str, str]] = set()
+        with pysam.VariantFile(str(male_proc / "snp_indel.genome.vcf.gz")) as male_gvf, \
+             pysam.VariantFile(str(fem_proc / "snp_indel.genome.vcf.gz")) as fem_gvf:
+            for carrier_lbl, partner_lbl, hit in carrier_gene_pairs:
+                gene = hit["gene"]
+                if (gene, partner_lbl) in checked_gene_partner:
+                    continue
+                checked_gene_partner.add((gene, partner_lbl))
+                cds_entry = cds_by_gene.get(gene)
+                if not cds_entry:
+                    continue
+                chrom, exons = cds_entry
+                partner_proc = male_proc if partner_lbl == male_lbl else fem_proc
+                partner_gvf = male_gvf if partner_lbl == male_lbl else fem_gvf
+                cov = compute_gene_gvcf_coverage(partner_gvf, chrom, exons, min_pass_dp=10)
+                rare_vars = scan_partner_gene_for_rare_coding_variants(
+                    partner_proc / "snp_indel.variants.norm.vcf.gz", gene, chrom, exons, api
+                )
+                partner_svs = (male_sv_genes if partner_lbl == male_lbl else fem_sv_genes).get(gene, [])
+                partner_rescue_rows.append({
+                    "carrier_partner": carrier_lbl,
+                    "checked_partner": partner_lbl,
+                    "gene": gene,
+                    "moi": hit["moi"],
+                    "carrier_variant": hit["variant_id"],
+                    "carrier_rsid": hit["rsid"],
+                    "carrier_evidence": f"{hit['evidence_tier']} ({hit['clnsig']})",
+                    "partner_cds_bp": cov["cds_bp"],
+                    "partner_pct_ge_10x": cov["pct_ge_10x"],
+                    "partner_rare_coding_count": len(rare_vars),
+                    "partner_rare_coding_variants": rare_vars,
+                    "partner_exonic_sv_count": len(partner_svs),
+                })
+        api.save()
+
+        # 3. Maternal X-linked & Mitochondrial screening
+        maternal_x_snv = [h for h in fem_hits if h["chrom"] == "X"]
+        maternal_mt_snv = [h for h in fem_hits if h["chrom"] == "MT"]
+        maternal_x_sv = fem_sv[fem_sv["chrom"].astype(str) == "X"].to_dict("records") if not fem_sv.empty else []
+
+        # 4. Autosomal Dominant (AD / AD-AR) & ACMG SF v3.3 in either partner
+        ad_acmg_hits = []
+        for lbl, lst in ((male_lbl, male_hits), (fem_lbl, fem_hits)):
+            for h in lst:
+                if h.get("acmg_sf") or h["moi"] in ("AD", "AD/AR"):
+                    ad_acmg_hits.append({"partner": lbl, **h})
+
+        novel_acmg_lofs = [
+            {"partner": male_lbl, **r} for r in male_novel_lofs
+        ] + [
+            {"partner": fem_lbl, **r} for r in fem_novel_lofs
+        ]
+
+        filtered_artifacts = [
+            {"partner": male_lbl, **r} for r in male_artifacts
+        ] + [
+            {"partner": fem_lbl, **r} for r in fem_artifacts
+        ]
+
+        # 5. Side-by-side canonical markers
+        male_tm = pd.read_csv(male_rep / "targeted_markers.tsv", sep="\t")
+        fem_tm = pd.read_csv(fem_rep / "targeted_markers.tsv", sep="\t")
+        tm_merged = male_tm[["category", "gene", "rsid", "locus", "description", "gt", "dp"]].merge(
+            fem_tm[["rsid", "gt", "dp"]], on="rsid", suffixes=(f"_{male_lbl}", f"_{fem_lbl}")
+        )
+
+        pd.DataFrame(partner_rescue_rows).drop(columns=["partner_rare_coding_variants"], errors="ignore").to_csv(
+            out_dir / "partner_gene_reciprocal_audit.tsv", sep="\t", index=False
+        )
+        tm_merged.to_csv(out_dir / "couple_targeted_markers.tsv", sep="\t", index=False)
 
     payload = {
         "reference_metadata": ref_meta,
@@ -539,6 +659,7 @@ def main() -> None:
         "ad_acmg_hits": ad_acmg_hits,
         "novel_acmg_lofs": novel_acmg_lofs,
         "filtered_artifacts": filtered_artifacts,
+        "bam_blind_spots": {male_lbl: male_bam, fem_lbl: fem_bam},
     }
     with open(out_dir / "couple_carrier_screen.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -586,14 +707,27 @@ def main() -> None:
         "_Genes where both partners carry a short-read coding-exon CNV/SV call without an SNV/indel hit. Many represent common polymorphic SVs, HLA diversity, or segmental-duplication artifacts, but are listed transparently rather than silently dropped._",
         "",
     ])
+    male_sv_bam = _sv_bam_verdict_by_gene(male_bam)
+    fem_sv_bam = _sv_bam_verdict_by_gene(fem_bam)
     if shared_sv_only_matches:
-        md.append(f"| Gene | {male_lbl.title()} Call(s) | {fem_lbl.title()} Call(s) | Classification / Note |")
-        md.append("|---|---|---|---|")
-        for m in shared_sv_only_matches:
-            m_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{male_lbl}_sv"])
-            f_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{fem_lbl}_sv"])
-            tag = "Known polymorphic/complex locus" if m["is_known_polymorphic"] else "Verify in BAM/gnomAD-SV"
-            md.append(f"| **{m['gene']}** | {m_sv_str} | {f_sv_str} | {tag}: {m['note']} |")
+        if male_bam or fem_bam:
+            md.append(f"| Gene | {male_lbl.title()} Call(s) | {fem_lbl.title()} Call(s) | BAM Read-Depth Audit ({male_lbl.title()} / {fem_lbl.title()}) | Classification / Note |")
+            md.append("|---|---|---|---|---|")
+            for m in shared_sv_only_matches:
+                m_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{male_lbl}_sv"])
+                f_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{fem_lbl}_sv"])
+                m_b = "; ".join(male_sv_bam.get(m["gene"], ["-"]))
+                f_b = "; ".join(fem_sv_bam.get(m["gene"], ["-"]))
+                tag = "Known polymorphic/complex locus" if m["is_known_polymorphic"] else "BAM audited"
+                md.append(f"| **{m['gene']}** | {m_sv_str} | {f_sv_str} | {male_lbl.title()}: `{m_b}` / {fem_lbl.title()}: `{f_b}` | {tag}: {m['note']} |")
+        else:
+            md.append(f"| Gene | {male_lbl.title()} Call(s) | {fem_lbl.title()} Call(s) | Classification / Note |")
+            md.append("|---|---|---|---|")
+            for m in shared_sv_only_matches:
+                m_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{male_lbl}_sv"])
+                f_sv_str = "; ".join(f"{s['svtype']} {s['length_bp']:,}bp ({s['gt_or_cn']})" for s in m[f"{fem_lbl}_sv"])
+                tag = "Known polymorphic/complex locus" if m["is_known_polymorphic"] else "Verify in BAM/gnomAD-SV"
+                md.append(f"| **{m['gene']}** | {m_sv_str} | {f_sv_str} | {tag}: {m['note']} |")
     else:
         md.append("_None identified._")
 
@@ -713,14 +847,62 @@ def main() -> None:
             f"`{r[f'gt_{fem_lbl}']}` ({r[f'dp_{fem_lbl}']}) | {r['description']} |"
         )
 
-    md.extend([
-        "",
-        "## 8. Essential Reproductive Blind-Spot Checklist (Not Cleared by Short-Read 30x WGS)",
-        "- **Maternal *FMR1* (Fragile X Syndrome):** CGG repeat expansion (invisible in short-read VCFs).",
-        "- **Both Partners *SMN1* (Spinal Muscular Atrophy):** Exon 7 copy number & `2+0` silent carrier testing.",
-        "- **Both Partners *HBA1 / HBA2* (Alpha-Thalassemia):** 3.7 kb / 4.2 kb deletions.",
-        "- **Both Partners *CYP21A2* (Congenital Adrenal Hyperplasia)** and ***GBA1* (Gaucher Disease):** Pseudogene homology interferes with short-read calling.",
-    ])
+    if male_bam or fem_bam:
+        def _smn_cell(b: dict[str, Any] | None) -> str:
+            if not b or b.get("smn", {}).get("status") != "OK":
+                return "Not run"
+            s = b["smn"]
+            return f"SMN1={s['smn1_cn']}, SMN2={s['smn2_cn']}, isCarrier={s['is_carrier']}, g.27134T>G={s['g27134tg']}"
+
+        def _fmr1_cell(b: dict[str, Any] | None) -> str:
+            if not b or b.get("expansion_hunter", {}).get("status") != "OK":
+                return "Not run"
+            fmr1 = b["expansion_hunter"].get("fmr1")
+            return f"`{fmr1['genotype']}` (CI `{fmr1['ci']}`, {fmr1['classification']})" if fmr1 else "Not called"
+
+        def _eh_cell(b: dict[str, Any] | None) -> str:
+            if not b or b.get("expansion_hunter", {}).get("status") != "OK":
+                return "Not run"
+            eh = b["expansion_hunter"]
+            if eh["n_flagged"] == 0:
+                return f"0/{eh['n_loci']} expanded (all normal)"
+            return "; ".join(f"{r['locus']} `{r['genotype']}` ({r['classification']})" for r in eh["flagged"])
+
+        def _cyp_cell(b: dict[str, Any] | None) -> str:
+            if not b or b.get("cyrius_cyp2d6", {}).get("status") != "OK":
+                return "Not run"
+            c = b["cyrius_cyp2d6"]
+            gt = str(c.get("genotype") or "").strip()
+            if not gt or gt.lower() == "none":
+                raw_cn = c.get("total_cn_raw")
+                cn_txt = f"Total_CN_raw={raw_cn}" if raw_cn is not None else "borderline CN"
+                return f"No call ({cn_txt}; confirm CN clinically)"
+            return f"`{gt}` ({c['filter']}; {c['cpic_phenotype']})"
+
+        md.extend([
+            "",
+            "## 8. BAM-Based Blind-Spot Callers (ExpansionHunter, SMNCopyNumberCaller, Cyrius)",
+            f"| Assay | {male_lbl.title()} | {fem_lbl.title()} |",
+            "|---|---|---|",
+            f"| **Fragile X (*FMR1* CGG Repeats)** | {_fmr1_cell(male_bam)} | {_fmr1_cell(fem_bam)} |",
+            f"| **Other Repeat Expansions (31 GRCh38 Loci)** | {_eh_cell(male_bam)} | {_eh_cell(fem_bam)} |",
+            f"| **SMA (*SMN1*/*SMN2* Exon 7 & 2+0)** | {_smn_cell(male_bam)} | {_smn_cell(fem_bam)} |",
+            f"| ***CYP2D6* Star Alleles / CNVs / Hybrids** | {_cyp_cell(male_bam)} | {_cyp_cell(fem_bam)} |",
+            "",
+            "## 9. Remaining Reproductive Blind-Spot Checklist (Not Cleared by Short-Read 30x WGS)",
+            "- **Both Partners *HBA1 / HBA2* (Alpha-Thalassemia):** 3.7 kb / 4.2 kb deletions.",
+            "- **Both Partners *CYP21A2* (Congenital Adrenal Hyperplasia)** and ***GBA1* (Gaucher Disease):** Pseudogene homology interferes with short-read calling.",
+            "- **Clinical Confirmation Note:** *FMR1*, *SMN1*, and *CYP2D6* were screened via research-grade BAM callers (`ExpansionHunter`, `SMNCopyNumberCaller`, `Cyrius`); confirm via a CLIA-certified clinical panel before reproductive or prescribing decisions.",
+        ])
+    else:
+        md.extend([
+            "",
+            "## 8. Essential Reproductive Blind-Spot Checklist (Not Cleared by Short-Read 30x WGS)",
+            "- **Maternal *FMR1* (Fragile X Syndrome):** CGG repeat expansion (invisible in short-read VCFs).",
+            "- **Both Partners *SMN1* (Spinal Muscular Atrophy):** Exon 7 copy number & `2+0` silent carrier testing.",
+            "- **Both Partners *HBA1 / HBA2* (Alpha-Thalassemia):** 3.7 kb / 4.2 kb deletions.",
+            "- **Both Partners *CYP21A2* (Congenital Adrenal Hyperplasia)** and ***GBA1* (Gaucher Disease):** Pseudogene homology interferes with short-read calling.",
+        ])
 
     report_path = out_dir / "couple_carrier_screening_report.md"
     report_path.write_text("\n".join(md) + "\n", encoding="utf-8")
@@ -740,6 +922,8 @@ def main() -> None:
         novel_acmg_lofs=novel_acmg_lofs,
         filtered_artifacts=filtered_artifacts,
         tm_merged=tm_merged,
+        male_bam=male_bam,
+        fem_bam=fem_bam,
     )
     plain_path = out_dir / "plain_language_summary.md"
     plain_path.write_text(plain_md, encoding="utf-8")

@@ -434,7 +434,15 @@ def main() -> None:
     pd.DataFrame(marker_rows).to_csv(
         reports_dir / "targeted_markers.tsv", sep="\t", index=False
     )
-    pgx_entries = interpret_pgx_profile(marker_rows)
+    cyrius_cyp2d6 = None
+    bam_json_path = reports_dir / "bam_blind_spots.json"
+    if bam_json_path.exists():
+        try:
+            bam_payload = json.loads(bam_json_path.read_text(encoding="utf-8"))
+            cyrius_cyp2d6 = bam_payload.get("cyrius_cyp2d6")
+        except (OSError, json.JSONDecodeError):
+            pass
+    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_cyp2d6)
     pgx_card_md = render_pgx_medication_card(args.sample, ref_meta, pgx_entries)
     pgx_card_path = reports_dir / "pgx_medication_card.md"
     pgx_card_path.write_text(pgx_card_md, encoding="utf-8")

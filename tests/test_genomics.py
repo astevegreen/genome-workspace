@@ -17,7 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.api_client import CachedAnnotationClient, format_af
 from lib.constants import ACMG_SF_GENES, TARGETED_MARKERS
-from lib.pgx import interpret_pgx_profile, render_pgx_medication_card
+from lib.pgx import interpret_cyp2d6_cyrius, interpret_pgx_profile, render_pgx_medication_card
 from lib.genomics import (
     assess_artifact_or_common,
     classify_clnsig,
@@ -365,3 +365,42 @@ def test_prs_weight_orientation_and_exact_scoring(tmp_path: Path) -> None:
     raw_scores, hits = step9.score_personal_wgs(vcf_gz, score_tsv, dists)
     assert abs(raw_scores["PGS_TEST"] - 4.0) < 1e-9
     assert hits["PGS_TEST"] == 2
+
+
+def test_cyp2d6_cyrius_interpretation_and_bam_helpers() -> None:
+    # CPIC 2019 consensus CYP2D6 star-allele / CNV / hybrid activity scoring
+    im = interpret_cyp2d6_cyrius("*1/*4", "PASS")
+    assert im["activity_score"] == 1.0
+    assert "Intermediate Metabolizer" in im["phenotype"]
+    assert im["tier"] == "ACTIONABLE"
+
+    pm = interpret_cyp2d6_cyrius("*4/*5", "PASS")
+    assert pm["activity_score"] == 0.0
+    assert "Poor Metabolizer" in pm["phenotype"]
+
+    um = interpret_cyp2d6_cyrius("*1/*2x2", "PASS")
+    assert um["activity_score"] == 3.0
+    assert "Ultrarapid Metabolizer" in um["phenotype"]
+
+    nm = interpret_cyp2d6_cyrius("*1/*2", "PASS")
+    assert nm["activity_score"] == 2.0
+    assert nm["tier"] == "NORMAL"
+
+    hybrid = interpret_cyp2d6_cyrius("*1/*68+*4", "PASS")
+    assert hybrid["activity_score"] == 1.0
+    assert "Intermediate Metabolizer" in hybrid["phenotype"]
+
+    # Step 10 repeat-expansion and SV depth classification helpers
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_mod")
+    assert step10.classify_repeat_size("FMR1", "29/31") == ("NORMAL", 31)
+    assert step10.classify_repeat_size("FMR1", "30/50") == ("INTERMEDIATE_GRAY_ZONE", 50)
+    assert step10.classify_repeat_size("FMR1", "30/75") == ("PREMUTATION", 75)
+    assert step10.classify_repeat_size("FMR1", "30/250") == ("FULL_MUTATION", 250)
+    assert step10.classify_repeat_size("HTT", "17/21") == ("NORMAL", 21)
+    assert step10.classify_repeat_size("HTT", "17/42") == ("EXPANDED_PATHOGENIC_RANGE", 42)
+
+    assert step10.classify_sv_bam_support("DEL", 0.02, 55.0, 20, 15) == "CONFIRMED_HOM_DEL"
+    assert step10.classify_sv_bam_support("DEL", 0.51, 55.0, 12, 10) == "CONFIRMED_HET_DEL"
+    assert step10.classify_sv_bam_support("DEL", 0.98, 55.0, 4, 2) == "NO_DEPTH_DROP_LIKELY_ARTIFACT_OR_REPEAT"
+    assert step10.classify_sv_bam_support("DUP", 1.48, 55.0, 10, 8) == "CONFIRMED_DUP_GAIN"
+    assert step10.classify_sv_bam_support("DUP", 1.01, 55.0, 5, 3) == "NO_DEPTH_GAIN_LIKELY_ARTIFACT_OR_REPEAT"

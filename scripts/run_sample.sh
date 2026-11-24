@@ -119,9 +119,15 @@ else
   echo "[${LABEL}] PRS reference distributions not built yet (run 'bash scripts/setup_prs_references.sh' to enable Step 9)."
 fi
 
-ALIGN_FOUND="$(find "data/alignments/${LABEL}" -maxdepth 1 -type f \( -name '*.bam' -o -name '*.cram' \) 2>/dev/null | head -n 1 || true)"
+ALIGN_FOUND="$(find "data/alignments/${LABEL}" -maxdepth 1 \( -type f -o -type l \) \( -name '*.bam' -o -name '*.cram' \) 2>/dev/null | head -n 1 || true)"
 if [[ -n "${ALIGN_FOUND}" ]]; then
-  echo "[${LABEL}] Alignment file detected: ${ALIGN_FOUND} (ready for ExpansionHunter / SMNCopyNumberCaller / Cyrius)"
+  echo "[${LABEL}] Alignment file detected: ${ALIGN_FOUND}"
+  if [[ ! -f "${QC_DIR}/bam.idxstats.tsv" ]]; then
+    echo "[${LABEL}] Running samtools idxstats -> ${QC_DIR}/bam.idxstats.tsv"
+    samtools idxstats "${ALIGN_FOUND}" > "${QC_DIR}/bam.idxstats.tsv"
+  fi
+  echo "[${LABEL}] Running Step 10 (BAM blind-spot callers: ExpansionHunter, SMNCopyNumberCaller, Cyrius, SV/phasing check)..."
+  .venv-wsl/bin/python scripts/10_bam_blind_spots.py --sample "${LABEL}" --threads "${THREADS}"
 else
   echo "[${LABEL}] No BAM/CRAM alignment file found in data/alignments/${LABEL}/ (skipping alignment-based blind-spot callers)."
 fi
