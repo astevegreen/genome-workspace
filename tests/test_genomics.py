@@ -457,6 +457,16 @@ def test_g6pd_mt_rnr1_interpretation_is_sex_and_ploidy_aware() -> None:
     assert inc["G6PD"]["tier"] == "INCOMPLETE"
     assert "G6PD" not in {e["gene"] for e in interpret_pgx_profile([], sex="M")}
 
+    # Low-depth REF: hemizygous male X at >= 6x is callable; female at 6x is not
+    shallow = _g6pd_mt_markers({})
+    for row in shallow:
+        if row["rsid"] == "rs1050828":
+            row.update(status="REF_LOW_DP", dp=6)
+    male_ok = {e["gene"]: e for e in interpret_pgx_profile(shallow, sex="M")}
+    assert male_ok["G6PD"]["phenotype"] == "Normal"
+    female_shallow = {e["gene"]: e for e in interpret_pgx_profile(shallow, sex="F")}
+    assert female_shallow["G6PD"]["tier"] == "INCOMPLETE"
+
 
 def test_hla_t1k_parsing_and_cpic_risk_alleles(tmp_path: Path) -> None:
     assert normalize_hla_allele("HLA-B*57:01:01") == "HLA-B*57:01"

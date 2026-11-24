@@ -981,6 +981,14 @@ def main() -> None:
     if not bam_path:
         print(f"[{sample_label}] No BAM/CRAM found in data/alignments/{sample_label}/ — skipping Step 10.")
         return
+    if not bam_path.exists():
+        # Broken symlink (e.g. external drive holding the BAM is not mounted): keep the previous
+        # bam_blind_spots.json/report untouched rather than failing the whole annual run.
+        print(
+            f"[{sample_label}] Alignment link {bam_path.name} points to a missing file "
+            f"({os.path.realpath(bam_path)}); is its drive mounted? Skipping Step 10 and keeping previous BAM results."
+        )
+        return
 
     rep_dir = REPO_ROOT / "results" / "reports" / sample_label
     work_dir = REPO_ROOT / "data" / "processed" / sample_label / "bam_callers"

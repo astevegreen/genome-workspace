@@ -269,6 +269,26 @@ def _interpret_g6pd(by_rs: dict[str, dict[str, Any]], sex: str) -> dict[str, Any
         }
 
     male = sex == "M"
+
+    def _too_shallow(row: dict[str, Any] | None) -> bool:
+        # REF calls below 10x are indeterminate, except hemizygous male X at >= 6x (Step 4 HEMI threshold)
+        if not row or str(row.get("status") or "") != "REF_LOW_DP":
+            return False
+        try:
+            dp = float(row.get("dp"))
+        except (TypeError, ValueError):
+            return True
+        return not (male and dp >= 6)
+
+    if any(_too_shallow(by_rs.get(rs)) for rs in rsids):
+        return {
+            **base,
+            "diplotype": "Indeterminate (low depth)",
+            "phenotype": "Indeterminate",
+            "tier": "INCOMPLETE",
+            "guidance": "One or more G6PD loci had a reference call below the depth threshold; use a G6PD enzyme activity test before high-risk drugs.",
+        }
+
     def_alleles: list[str] = []
     n_a_minus = 0
     for rs, (label, is_a_minus) in _G6PD_DEFICIENT.items():
