@@ -7,8 +7,9 @@ Runs specialized short-read alignment callers on data/alignments/<label>/*.{bam,
   3. Cyrius: Full CYP2D6 star-allele, CNV (*5 del, duplications), and CYP2D7 hybrid calling
   4. BAM Read-Level Verification of Exonic SVs (inside vs. flanking depth ratio, MAPQ, split/discordant reads)
   5. BAM Read-Backed Phasing (cis vs. trans via shared reads / read pairs) for candidate compound hets
+  6. T1K: HLA class I/II typing (two-field) for CPIC drug-hypersensitivity alleles
 
-Also upgrades results/reports/<label>/pgx_medication_card.{md,tsv} with Cyrius-resolved CYP2D6 calls.
+Also upgrades results/reports/<label>/pgx_medication_card.{md,tsv} with Cyrius CYP2D6 and T1K HLA calls.
 """
 
 from __future__ import annotations
@@ -31,8 +32,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.genomics import get_reference_metadata, normalize_gt_unphased
-from lib.pgx import interpret_cyp2d6_cyrius, interpret_pgx_profile, render_pgx_medication_card
+from lib.genomics import get_reference_metadata, normalize_gt_unphased, read_sample_sex
+from lib.pgx import (
+    HLA_PGX_GENES,
+    interpret_cyp2d6_cyrius,
+    interpret_hla_typing,
+    interpret_pgx_profile,
+    render_pgx_medication_card,
+)
 
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_TOOLS_DIR = Path.home() / ".local" / "opt" / "wgs_tools"
@@ -121,14 +128,7 @@ def find_alignment_file(sample_label: str) -> Path | None:
 
 def get_sample_sex(sample_label: str) -> str:
     """Look up sample sex ('M' or 'F') from config/samples.tsv."""
-    tsv = REPO_ROOT / "config" / "samples.tsv"
-    if tsv.exists():
-        with open(tsv, encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                if row.get("label") == sample_label:
-                    return (row.get("sex") or "").strip().upper()
-    return ""
+    return read_sample_sex(REPO_ROOT / "config" / "samples.tsv", sample_label)
 
 
 def detect_bam_has_chr(bam_path: Path) -> bool:
@@ -397,6 +397,98 @@ def run_cyrius(bam_path: Path, out_dir: Path, sample_label: str, threads: int) -
         "cpic_activity_score": cpic.get("activity_score"),
         "cpic_guidance": cpic["guidance"],
         "output_tsv": str(tsv_path),
+    }
+
+
+HLA_REPORT_GENES: tuple[str, ...] = ("HLA-A", "HLA-B", "HLA-C", "HLA-DRB1", "HLA-DQA1", "HLA-DQB1", "HLA-DPB1")
+
+
+def parse_t1k_genotype(tsv_path: Path) -> dict[str, Any]:
+    """
+    Parse a T1K *_genotype.tsv (no header):
+    gene_name num_diff_alleles allele_1 abundance_1 quality_1 allele_2 abundance_2 quality_2 secondary_alleles
+    Alleles with quality <= 0 are dropped (T1K README recommendation); '.' marks a missing/homozygous slot.
+    """
+    genotypes: dict[str, list[str]] = {}
+    rows: list[dict[str, Any]] = []
+    with open(tsv_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) < 8:
+                continue
+            gene = cols[0]
+            called: list[str] = []
+            for allele, qual in ((cols[2], cols[4]), (cols[5], cols[7])):
+                try:
+                    q = float(qual)
+                except ValueError:
+                    q = -1.0
+                if allele and allele != "." and q > 0:
+                    called.append(allele)
+            genotypes[gene] = called
+            rows.append({
+                "gene": gene,
+                "num_diff_alleles": cols[1],
+                "allele_1": cols[2],
+                "quality_1": cols[4],
+                "allele_2": cols[5],
+                "quality_2": cols[7],
+                "called": "/".join(called) if called else "no confident call",
+            })
+    return {"genotypes": genotypes, "rows": rows}
+
+
+def run_t1k_hla(
+    bam_path: Path, out_dir: Path, sample_label: str, threads: int, has_chr: bool
+) -> dict[str, Any]:
+    """Run T1K (--preset hla-wgs) on the BAM for two-field HLA typing."""
+    t1k_bin = find_tool("run-t1k")
+    if not t1k_bin:
+        return {"status": "TOOL_NOT_FOUND", "error": "run-t1k not found in PATH or ~/.local/bin (run scripts/setup_bam_tools.sh)"}
+
+    tools_dir = Path(os.environ.get("WGS_TOOLS_DIR", str(DEFAULT_TOOLS_DIR)))
+    idx_dir = tools_dir / "t1k_hlaidx"
+    seq_fa = idx_dir / "hlaidx_dna_seq.fa"
+    coord_fa = idx_dir / ("hlaidx_dna_coord.fa" if has_chr else "hlaidx_dna_coord.nochr.fa")
+    if not seq_fa.exists() or not coord_fa.exists():
+        return {"status": "MISSING_INDEX", "error": f"T1K HLA index not found in {idx_dir} (run scripts/setup_bam_tools.sh)"}
+
+    t1k_dir = out_dir / "t1k"
+    t1k_dir.mkdir(parents=True, exist_ok=True)
+    geno_tsv = t1k_dir / f"{sample_label}_genotype.tsv"
+
+    if not geno_tsv.exists():
+        print(f"[{sample_label}] Running T1K HLA typing (hla-wgs preset)...")
+        cmd = [
+            t1k_bin,
+            "-b", str(bam_path.resolve()),
+            "-f", str(seq_fa),
+            "-c", str(coord_fa),
+            "--preset", "hla-wgs",
+            "-t", str(threads),
+            "-o", sample_label,
+            "--od", str(t1k_dir),
+            "--alleleDigitUnits", "2",
+            "--alleleDelimiter", ":",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 or not geno_tsv.exists():
+            return {
+                "status": "ERROR",
+                "error": (proc.stderr or proc.stdout or f"exit {proc.returncode}")[-500:],
+            }
+    else:
+        print(f"[{sample_label}] Reusing existing T1K output: {geno_tsv}")
+
+    parsed = parse_t1k_genotype(geno_tsv)
+    return {
+        "status": "OK",
+        "tool": "T1K (--preset hla-wgs)",
+        "genotypes": parsed["genotypes"],
+        "rows": parsed["rows"],
+        "output_tsv": str(geno_tsv),
     }
 
 
@@ -707,6 +799,7 @@ def render_bam_report(
     cyrius_res: dict[str, Any],
     sv_rows: list[dict[str, Any]],
     phasing_rows: list[dict[str, Any]],
+    hla_res: dict[str, Any] | None = None,
 ) -> str:
     today = datetime.date.today().isoformat()
     md = [
@@ -714,7 +807,7 @@ def render_bam_report(
         "",
         f"**Run Date:** {today} | **Alignment:** `{bam_path.name}`",
         "",
-        "> **Clinical Disclaimer:** Research-grade BAM bioinformatics analysis (ExpansionHunter, SMNCopyNumberCaller, Cyrius). "
+        "> **Clinical Disclaimer:** Research-grade BAM bioinformatics analysis (ExpansionHunter, SMNCopyNumberCaller, Cyrius, T1K). "
         "Confirm any actionable or reproductive finding via a CLIA-certified clinical laboratory before medical decisions.",
         "",
         "## 1. Spinal Muscular Atrophy (*SMN1* / *SMN2* Exon 7 & 2+0 Silent Carrier)",
@@ -818,22 +911,58 @@ def render_bam_report(
     else:
         md.append("_No candidate compound heterozygotes identified in Step 4/5._")
 
+    md.extend([
+        "",
+        "## 6. HLA Typing & CPIC Drug-Hypersensitivity Alleles (T1K)",
+    ])
+    hla_res = hla_res or {"status": "NOT_RUN"}
+    if hla_res.get("status") == "OK":
+        md.extend([
+            "| Gene | Allele 1 (quality) | Allele 2 (quality) | Called (quality > 0) |",
+            "|---|---|---|---|",
+        ])
+        by_gene = {r["gene"]: r for r in hla_res.get("rows", [])}
+        for gene in HLA_REPORT_GENES:
+            r = by_gene.get(gene)
+            if not r:
+                md.append(f"| **{gene}** | - | - | not reported |")
+                continue
+            md.append(
+                f"| **{gene}** | `{r['allele_1']}` ({r['quality_1']}) | `{r['allele_2']}` ({r['quality_2']}) | `{r['called']}` |"
+            )
+        md.extend(["", "**CPIC risk-allele check (HLA-A / HLA-B):**", ""])
+        for e in interpret_hla_typing(hla_res):
+            md.append(f"- **[{e['tier']}] `{e['gene']}` — {e['phenotype']}:** {e['guidance']}")
+        md.append("")
+        md.append(
+            f"_Class II genes ({', '.join(g for g in HLA_REPORT_GENES if g not in HLA_PGX_GENES)}) are shown for information only; "
+            "HLA typing from short reads is research-grade, so confirm any positive with clinical HLA typing._"
+        )
+    else:
+        md.append(f"_Unavailable: {hla_res.get('status')} ({hla_res.get('error', '')})_")
+
     return "\n".join(md) + "\n"
 
 
-def refresh_pgx_card_with_cyrius(sample_label: str, rep_dir: Path, cyrius_res: dict[str, Any]) -> None:
-    """Re-render pgx_medication_card.{md,tsv} with BAM-resolved Cyrius CYP2D6 call."""
+def refresh_pgx_card_with_bam(
+    sample_label: str,
+    rep_dir: Path,
+    cyrius_res: dict[str, Any],
+    hla_res: dict[str, Any],
+    sex: str,
+) -> None:
+    """Re-render pgx_medication_card.{md,tsv} with BAM-resolved Cyrius CYP2D6 and T1K HLA calls."""
     tm_tsv = rep_dir / "targeted_markers.tsv"
-    if not tm_tsv.exists() or cyrius_res.get("status") != "OK":
+    if not tm_tsv.exists() or (cyrius_res.get("status") != "OK" and hla_res.get("status") != "OK"):
         return
-    df = pd.read_csv(tm_tsv, sep="\t")
+    df = pd.read_csv(tm_tsv, sep="\t", dtype={"gt": str})
     marker_rows = df.to_dict("records")
-    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_res)
+    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_res, sex=sex, hla=hla_res)
     pd.DataFrame(pgx_entries).to_csv(rep_dir / "pgx_medication_card.tsv", sep="\t", index=False)
     ref_meta = get_reference_metadata(REPO_ROOT / "data" / "reference")
     card_md = render_pgx_medication_card(sample_label, ref_meta, pgx_entries)
     (rep_dir / "pgx_medication_card.md").write_text(card_md, encoding="utf-8")
-    print(f"[{sample_label}] Updated PGx Medication Card with BAM Cyrius CYP2D6 ({cyrius_res.get('genotype')}).")
+    print(f"[{sample_label}] Updated PGx Medication Card with BAM calls (Cyrius {cyrius_res.get('status')}, T1K {hla_res.get('status')}).")
 
 
 def main() -> None:
@@ -865,6 +994,7 @@ def main() -> None:
     eh_res = run_expansion_hunter(bam_path, fasta_path, sex, work_dir, sample_label, args.threads, has_chr)
     smn_res = run_smn_caller(bam_path, work_dir, sample_label, args.threads)
     cyrius_res = run_cyrius(bam_path, work_dir, sample_label, args.threads)
+    hla_res = run_t1k_hla(bam_path, work_dir, sample_label, args.threads, has_chr)
 
     print(f"[{sample_label}] Verifying coding-exon SVs in BAM...")
     sv_rows = verify_exonic_svs_in_bam(bam_path, rep_dir / "cnv_sv_exonic_clinical.tsv", has_chr)
@@ -880,6 +1010,7 @@ def main() -> None:
         "expansion_hunter": eh_res,
         "smn": smn_res,
         "cyrius_cyp2d6": cyrius_res,
+        "hla_t1k": hla_res,
         "sv_verification": sv_rows,
         "phasing_checks": phasing_rows,
     }
@@ -891,12 +1022,14 @@ def main() -> None:
     if sv_rows:
         pd.DataFrame(sv_rows).to_csv(rep_dir / "bam_sv_verification.tsv", sep="\t", index=False)
 
-    report_md = render_bam_report(sample_label, bam_path, eh_res, smn_res, cyrius_res, sv_rows, phasing_rows)
+    report_md = render_bam_report(
+        sample_label, bam_path, eh_res, smn_res, cyrius_res, sv_rows, phasing_rows, hla_res
+    )
     out_md = rep_dir / "bam_blind_spots_report.md"
     out_md.write_text(report_md, encoding="utf-8")
     print(f"[{sample_label}] BAM blind-spot report written to {out_md}")
 
-    refresh_pgx_card_with_cyrius(sample_label, rep_dir, cyrius_res)
+    refresh_pgx_card_with_bam(sample_label, rep_dir, cyrius_res, hla_res, sex)
 
 
 if __name__ == "__main__":

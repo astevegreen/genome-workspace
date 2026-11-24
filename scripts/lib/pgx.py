@@ -125,22 +125,251 @@ def _alt_dosage(row: dict[str, Any] | None) -> int | None:
     if status in ("NOT_COVERED", "VARIANT_LOW_CONFIDENCE"):
         return None
     gt = normalize_gt_unphased(str(row.get("gt") or ""))
-    if gt.startswith("0/0"):
+    if gt.startswith("0/0") or gt == "0":
         return 0
-    if gt in ("0/1", "1/0"):
+    if gt in ("0/1", "1/0", "1"):
+        # "1" = haploid ALT call (hemizygous male X or homoplasmic MT)
         return 1
     if gt == "1/1":
         return 2
     return None
 
 
+def _ab_value(row: dict[str, Any] | None) -> float | None:
+    """Return the ALT allele balance (heteroplasmy fraction for MT) or None when missing/NaN."""
+    if not row:
+        return None
+    try:
+        val = float(row.get("ab"))
+    except (TypeError, ValueError):
+        return None
+    return None if val != val else val  # NaN check
+
+
+# CPIC HLA risk alleles (two-field) with affected drugs and summary guidance.
+CPIC_HLA_RISK_ALLELES: dict[str, tuple[str, str]] = {
+    "HLA-B*57:01": (
+        "Abacavir",
+        "Do not use abacavir (CPIC: high risk of abacavir hypersensitivity). Also linked to flucloxacillin liver injury.",
+    ),
+    "HLA-B*58:01": (
+        "Allopurinol",
+        "Avoid allopurinol (CPIC: high risk of SJS/TEN and DRESS); use an alternative urate-lowering drug.",
+    ),
+    "HLA-B*15:02": (
+        "Carbamazepine, oxcarbazepine, phenytoin/fosphenytoin",
+        "Avoid carbamazepine and oxcarbazepine unless already taken long-term without reaction; avoid phenytoin/fosphenytoin (CPIC: SJS/TEN risk).",
+    ),
+    "HLA-A*31:01": (
+        "Carbamazepine",
+        "Avoid carbamazepine unless already taken long-term without reaction; if no alternative, use with close monitoring (CPIC: SJS/TEN, DRESS and rash risk).",
+    ),
+}
+
+HLA_PGX_GENES: tuple[str, ...] = ("HLA-A", "HLA-B")
+
+
+def normalize_hla_allele(allele: str | None) -> str | None:
+    """Normalize a typed HLA allele (e.g. 'B*57:01:01', 'HLA-B*57:01') to two-field 'HLA-B*57:01'."""
+    a = (allele or "").strip()
+    if not a or a == "." or "*" not in a:
+        return None
+    gene, _, fields = a.partition("*")
+    gene = gene if gene.startswith("HLA-") else f"HLA-{gene}"
+    parts = [p for p in re.split(r"[:]", fields) if p]
+    if len(parts) < 2:
+        return None
+    # Strip expression suffixes (N, L, S, Q...) from the second field for risk-allele matching
+    second = re.sub(r"[A-Z]+$", "", parts[1])
+    return f"{gene}*{parts[0]}:{second}"
+
+
+def interpret_hla_typing(hla: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Map BAM-based HLA-A / HLA-B typing (T1K) to CPIC hypersensitivity risk entries."""
+    if not hla or hla.get("status") != "OK":
+        return []
+    genotypes: dict[str, list[str]] = hla.get("genotypes") or {}
+    entries: list[dict[str, Any]] = []
+    for gene in HLA_PGX_GENES:
+        alleles = [n for n in (normalize_hla_allele(a) for a in genotypes.get(gene, [])) if n]
+        gene_drugs = ", ".join(sorted({d for k, (d, _) in CPIC_HLA_RISK_ALLELES.items() if k.startswith(gene + "*")}))
+        if not alleles:
+            entries.append({
+                "gene": gene,
+                "diplotype": "No confident call",
+                "phenotype": "Indeterminate (BAM T1K)",
+                "tier": "INCOMPLETE",
+                "drugs": gene_drugs,
+                "guidance": "T1K could not type this gene confidently from the BAM; use clinical HLA typing before prescribing the listed drugs.",
+                "source": "BAM_T1K",
+            })
+            continue
+        if len(alleles) == 1:
+            alleles = alleles * 2  # homozygous (T1K reports one distinct allele)
+        dip = "/".join(a.removeprefix("HLA-") for a in alleles)
+        hits = sorted({a for a in alleles if a in CPIC_HLA_RISK_ALLELES})
+        if hits:
+            entries.append({
+                "gene": gene,
+                "diplotype": f"{dip} (BAM T1K)",
+                "phenotype": "Positive for " + ", ".join(h.removeprefix("HLA-") for h in hits),
+                "tier": "ACTIONABLE",
+                "drugs": "; ".join(CPIC_HLA_RISK_ALLELES[h][0] for h in hits),
+                "guidance": " ".join(CPIC_HLA_RISK_ALLELES[h][1] for h in hits)
+                + " Research-grade call: confirm with clinical HLA typing.",
+                "source": "BAM_T1K",
+            })
+        else:
+            tested = ", ".join(k.removeprefix("HLA-") for k in CPIC_HLA_RISK_ALLELES if k.startswith(gene + "*"))
+            entries.append({
+                "gene": gene,
+                "diplotype": f"{dip} (BAM T1K)",
+                "phenotype": f"Negative for {tested}",
+                "tier": "NORMAL",
+                "drugs": gene_drugs,
+                "guidance": "No CPIC HLA risk allele found; standard prescribing for the listed drugs.",
+                "source": "BAM_T1K",
+            })
+    return entries
+
+
+_G6PD_DEFICIENT: dict[str, tuple[str, bool]] = {
+    # rsid: (allele label, is an A- allele carried on the c.376A>G backbone)
+    "rs1050828": ("A- (c.202A)", True),
+    "rs137852328": ("A- (c.680T)", True),
+    "rs76723693": ("A- (c.968C)", True),
+    "rs5030868": ("Mediterranean", False),
+    "rs72554665": ("Canton", False),
+    "rs72554664": ("Kaiping", False),
+}
+_G6PD_A_RS = "rs1050829"
+_G6PD_DRUGS = "Rasburicase, pegloticase, tafenoquine, primaquine, dapsone, methylene blue, nitrofurantoin, sulfonamides"
+_MT_RNR1_RS: dict[str, str] = {
+    "rs267606617": "m.1555A>G",
+    "rs267606619": "m.1494C>T",
+    "rs267606618": "m.1095T>C",
+}
+_AMINOGLYCOSIDES = "Aminoglycosides (gentamicin, tobramycin, amikacin, streptomycin, neomycin)"
+
+
+def _interpret_g6pd(by_rs: dict[str, dict[str, Any]], sex: str) -> dict[str, Any] | None:
+    """CPIC 2022 G6PD genotype-to-phenotype for the common deficiency alleles (X-linked, sex-aware)."""
+    rsids = list(_G6PD_DEFICIENT) + [_G6PD_A_RS]
+    if not any(rs in by_rs for rs in rsids):
+        return None  # markers not genotyped in this run (older targeted_markers.tsv)
+    doses = {rs: _alt_dosage(by_rs.get(rs)) for rs in rsids}
+    base = {"gene": "G6PD", "drugs": _G6PD_DRUGS}
+    if any(v is None for v in doses.values()):
+        return {
+            **base,
+            "diplotype": "Indeterminate",
+            "phenotype": "Indeterminate",
+            "tier": "INCOMPLETE",
+            "guidance": "One or more G6PD loci lacked PASS >=10x coverage; use a G6PD enzyme activity test before high-risk drugs.",
+        }
+
+    male = sex == "M"
+    def_alleles: list[str] = []
+    n_a_minus = 0
+    for rs, (label, is_a_minus) in _G6PD_DEFICIENT.items():
+        n = min(doses[rs], 1) if male else doses[rs]
+        def_alleles += [label] * n
+        n_a_minus += n if is_a_minus else 0
+    n_376 = min(doses[_G6PD_A_RS], 1) if male else doses[_G6PD_A_RS]
+    other = ["A (c.376G)"] * max(0, n_376 - n_a_minus)
+    ploidy = 1 if male else 2
+    alleles = (def_alleles + other)[:ploidy]
+    while len(alleles) < ploidy:
+        alleles.append("B (reference)")
+    dip = "/".join(alleles) + (" (hemizygous)" if male else "")
+    n_def = min(len(def_alleles), ploidy)
+
+    deficient_note = (
+        "Avoid rasburicase, pegloticase and tafenoquine; check the CPIC G6PD guideline (2022) before primaquine, dapsone, "
+        "methylene blue, nitrofurantoin or sulfonamides; avoid fava beans. Confirm with a quantitative G6PD enzyme activity test."
+    )
+    if (male and n_def >= 1) or (not male and n_def >= 2):
+        phase_note = "" if male or len(set(def_alleles)) == 1 else " (assumes the two deficient alleles are on different X chromosomes; phase unverified)"
+        return {**base, "diplotype": dip, "phenotype": "Deficient" + phase_note, "tier": "ACTIONABLE", "guidance": deficient_note}
+    if n_def == 1:
+        if sex == "F":
+            return {
+                **base,
+                "diplotype": dip,
+                "phenotype": "Variable (heterozygous female)",
+                "tier": "ACTIONABLE",
+                "guidance": "Activity can range from normal to deficient (X-inactivation). Get a quantitative G6PD enzyme activity test before "
+                "rasburicase, pegloticase, tafenoquine or primaquine, and treat as deficient until then.",
+            }
+        return {
+            **base,
+            "diplotype": dip,
+            "phenotype": "Indeterminate (sample sex unknown)",
+            "tier": "MODERATE",
+            "guidance": "One deficient allele found but sample sex is missing from config/samples.tsv; get a G6PD enzyme activity test.",
+        }
+    return {
+        **base,
+        "diplotype": dip,
+        "phenotype": "Normal",
+        "tier": "NORMAL",
+        "guidance": "Common deficiency alleles absent. Over 200 rare G6PD variants exist: check the carrier report for ClinVar G6PD hits.",
+    }
+
+
+def _interpret_mt_rnr1(by_rs: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """CPIC 2021 MT-RNR1 aminoglycoside guideline (m.1555A>G, m.1494C>T, m.1095T>C)."""
+    if not any(rs in by_rs for rs in _MT_RNR1_RS):
+        return None
+    base = {"gene": "MT-RNR1", "drugs": _AMINOGLYCOSIDES}
+    doses = {rs: _alt_dosage(by_rs.get(rs)) for rs in _MT_RNR1_RS}
+    present: list[str] = []
+    for rs, label in _MT_RNR1_RS.items():
+        if doses[rs]:
+            gt = normalize_gt_unphased(str(by_rs[rs].get("gt") or ""))
+            ab = _ab_value(by_rs[rs])
+            if gt in ("1", "1/1"):
+                state = "homoplasmic" if ab is None else f"homoplasmic, AF={ab:.2f}"
+            else:
+                state = "heteroplasmic" if ab is None else f"heteroplasmic, AF={ab:.2f}"
+            present.append(f"{label} ({state})")
+    if present:
+        return {
+            **base,
+            "diplotype": "; ".join(present),
+            "phenotype": "Increased Risk of Aminoglycoside-Induced Hearing Loss",
+            "tier": "ACTIONABLE",
+            "guidance": "Avoid aminoglycosides unless the infection risk outweighs permanent hearing loss and no alternative exists (CPIC 2021); "
+            "even single doses can cause deafness. Maternal relatives share this mitochondrial variant.",
+        }
+    if any(v is None for v in doses.values()):
+        return {
+            **base,
+            "diplotype": "Indeterminate",
+            "phenotype": "Indeterminate",
+            "tier": "INCOMPLETE",
+            "guidance": "One or more MT-RNR1 loci lacked PASS >=10x coverage; use clinical MT-RNR1 testing before elective aminoglycoside use.",
+        }
+    return {
+        **base,
+        "diplotype": "Reference (m.1555A, m.1494C, m.1095T)",
+        "phenotype": "Normal Risk",
+        "tier": "NORMAL",
+        "guidance": "No CPIC MT-RNR1 risk variant found; standard aminoglycoside use with usual monitoring.",
+    }
+
+
 def interpret_pgx_profile(
     marker_rows: list[dict[str, Any]],
     cyrius_cyp2d6: dict[str, Any] | None = None,
+    sex: str = "",
+    hla: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Map targeted PGx marker rows (from 07_deep_analysis.py) into structured CPIC
     diplotype, phenotype, actionability tier, affected drug classes, and clinical notes.
+
+    `sex` ('M'/'F') drives X-linked G6PD calls; `hla` is the Step 10 T1K payload.
     """
     by_rs = {str(r["rsid"]): r for r in marker_rows}
     results: list[dict[str, Any]] = []
@@ -534,6 +763,14 @@ def interpret_pgx_profile(
                     "guidance": f"Negative for *4{cyrius_note or ', but standard VCFs cannot detect *5 whole-gene deletion, duplications (UM), or CYP2D7 hybrids'}.",
                 })
 
+    # 12. G6PD (X-linked) and 13. MT-RNR1 (mitochondrial)
+    for entry in (_interpret_g6pd(by_rs, (sex or "").strip().upper()), _interpret_mt_rnr1(by_rs)):
+        if entry:
+            results.append(entry)
+
+    # 14. HLA-A / HLA-B drug hypersensitivity (BAM T1K typing)
+    results.extend(interpret_hla_typing(hla))
+
     tier_order = {"ACTIONABLE": 0, "MODERATE": 1, "PARTIAL": 2, "INCOMPLETE": 3, "NORMAL": 4}
     results.sort(key=lambda r: (tier_order.get(r["tier"], 9), r["gene"]))
     return results
@@ -593,12 +830,25 @@ def render_pgx_medication_card(
         else "- ***CYP2D6* structural alleles:** Standard VCFs detect `*4` (`rs3892097`) but cannot reliably call whole-gene deletions (`*5`), gene duplications (ultrarapid metabolizers), or *CYP2D7* hybrids. Uploading BAM/CRAM files unlocks `Cyrius`/`Aldy`."
     )
 
+    hla_typed = any(e.get("source") == "BAM_T1K" for e in pgx_entries)
+    hla_limitation = (
+        "- ***HLA-A* / *HLA-B* drug hypersensitivity (BAM-typed via T1K):** Two-field HLA alleles were typed from the 30x WGS BAM "
+        "(`HLA-B*57:01` abacavir, `HLA-B*58:01` allopurinol, `HLA-B*15:02` and `HLA-A*31:01` carbamazepine). HLA is the most polymorphic "
+        "region of the genome; treat these as research-grade and confirm with clinical HLA typing before acting."
+        if hla_typed
+        else "- ***HLA-A* / *HLA-B* drug hypersensitivity:** Severe hypersensitivity alleles (`HLA-B*57:01` abacavir, `HLA-B*15:02` carbamazepine, "
+        "`HLA-B*58:01` allopurinol, `HLA-A*31:01` carbamazepine) need HLA typing: run `scripts/setup_bam_tools.sh` (installs T1K) and Step 10, or use clinical HLA testing."
+    )
+
     md.extend([
         "",
         "## 3. Known Short-Read Pharmacogenomics Limitations",
         cyp2d6_limitation,
         "- ***UGT1A1\\*28* TA-repeat:** Promoter `(TA)7` repeat expansion is not reliably called in standard short-read SNV VCFs.",
-        "- ***HLA-A* / *HLA-B* drug hypersensitivity:** Severe hypersensitivity alleles (`HLA-B*57:01` abacavir, `HLA-B*15:02` carbamazepine, `HLA-B*58:01` allopurinol) require dedicated HLA typing on BAM/CRAM reads or clinical HLA testing.",
+        hla_limitation,
+        "- ***G6PD*:** Only six common deficiency alleles (A- c.202A/c.680T/c.968C, Mediterranean, Canton, Kaiping) are tested; "
+        "over 200 rare variants exist. Heterozygous females have variable activity, so a quantitative enzyme activity test is the deciding test.",
+        "- ***MT-RNR1*:** Low-level heteroplasmy below the caller's detection limit is not excluded.",
         "- **Rare non-panel alleles:** A `Normal` call confirms reference (`0/0`) at the major CPIC defining loci, not absence of ultra-rare private variants.",
     ])
     return "\n".join(md) + "\n"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import datetime
 import gzip
 import re
@@ -100,6 +101,17 @@ def resolve_gene_moi(
         moi = "XL"
 
     return primary_gene, moi, gencc_diseases
+
+
+def read_sample_sex(samples_tsv: Path, sample_label: str) -> str:
+    """Look up sample sex ('M'/'F', or '' if unknown) from a config/samples.tsv registry."""
+    if not samples_tsv.exists():
+        return ""
+    with open(samples_tsv, encoding="utf-8") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            if row.get("label") == sample_label:
+                return (row.get("sex") or "").strip().upper()
+    return ""
 
 
 def normalize_gt_unphased(gt_str: str) -> str:

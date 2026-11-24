@@ -40,6 +40,7 @@ from lib.genomics import (
     derive_apoe_diplotype,
     get_reference_metadata,
     load_gencode_cds,
+    read_sample_sex,
     reciprocal_overlap,
     record_effective_min_dp,
     record_is_pass,
@@ -275,7 +276,13 @@ def run_targeted_marker_genotyping(
             status = "REF_CONFIRMED"
 
             found_var = False
-            for rec in nvf.fetch(chrom, pos - 1, pos + len(ref)):
+            try:
+                var_recs = list(nvf.fetch(chrom, pos - 1, pos + len(ref)))
+                gvcf_recs = list(gvf.fetch(chrom, pos - 1, pos))
+            except ValueError:
+                # Contig absent from this VCF (e.g. no MT calls): record as not covered
+                var_recs, gvcf_recs = [], []
+            for rec in var_recs:
                 if rec.pos == pos and rec.ref == ref and rec.alts and alt in rec.alts:
                     sample = next(iter(rec.samples.values()))
                     gt = sample.get("GT")
@@ -299,7 +306,7 @@ def run_targeted_marker_genotyping(
                 best_pass_dp = None
                 best_any_dp = None
                 best_any_flt = "NO_CALL"
-                for rec in gvf.fetch(chrom, pos - 1, pos):
+                for rec in gvcf_recs:
                     r_start = rec.pos
                     r_end = rec.stop or rec.info.get("END") or rec.pos
                     if r_start <= pos <= r_end:
@@ -435,14 +442,17 @@ def main() -> None:
         reports_dir / "targeted_markers.tsv", sep="\t", index=False
     )
     cyrius_cyp2d6 = None
+    hla_t1k = None
     bam_json_path = reports_dir / "bam_blind_spots.json"
     if bam_json_path.exists():
         try:
             bam_payload = json.loads(bam_json_path.read_text(encoding="utf-8"))
             cyrius_cyp2d6 = bam_payload.get("cyrius_cyp2d6")
+            hla_t1k = bam_payload.get("hla_t1k")
         except (OSError, json.JSONDecodeError):
             pass
-    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_cyp2d6)
+    sex = read_sample_sex(REPO_ROOT / "config" / "samples.tsv", args.sample)
+    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_cyp2d6, sex=sex, hla=hla_t1k)
     pgx_card_md = render_pgx_medication_card(args.sample, ref_meta, pgx_entries)
     pgx_card_path = reports_dir / "pgx_medication_card.md"
     pgx_card_path.write_text(pgx_card_md, encoding="utf-8")
