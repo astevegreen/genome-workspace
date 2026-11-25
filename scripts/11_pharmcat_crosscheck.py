@@ -33,6 +33,7 @@ from lib.pharmcat import (
     build_outside_calls,
     compare_card_with_pharmcat,
     parse_calls_only_tsv,
+    parse_phenotype_json,
     render_crosscheck_report,
     write_outside_calls,
     write_pharmcat_input,
@@ -78,8 +79,9 @@ def main() -> None:
     work = proc_dir / "pharmcat"
     if work.exists():
         shutil.rmtree(work)
-    work.mkdir(parents=True)
-    input_vcf = work / f"{label}.vcf.bgz"
+    in_dir = work / "in"
+    in_dir.mkdir(parents=True)
+    input_vcf = in_dir / f"{label}.vcf.bgz"
     print(f"[{label}] Building PharmCAT input from the variants VCF and gVCF reference blocks...")
     male = read_sample_sex(REPO_ROOT / "config" / "samples.tsv", label) == "M"
     stats = write_pharmcat_input(variants, gvcf, positions, input_vcf, min_dp=args.min_ref_dp, male=male)
@@ -88,27 +90,33 @@ def main() -> None:
     bam = json.loads(bam_json.read_text(encoding="utf-8")) if bam_json.exists() else None
     outside = build_outside_calls(bam)
     if outside:
-        # pharmcat_pipeline picks up <vcf basename>.outside.tsv from the VCF's folder
-        write_outside_calls(work / f"{label}.outside.tsv", outside)
+        # pharmcat_pipeline copies *.outside.tsv only when its input is a directory, and pairs
+        # <name>.outside.tsv with the VCF of the same base name
+        write_outside_calls(in_dir / f"{label}.outside.tsv", outside)
 
     print(f"[{label}] Running PharmCAT (outside calls: {', '.join(sorted(outside)) or 'none'})...")
     out_dir = work / "out"
-    cmd = [exe, str(input_vcf), "-o", str(out_dir), "-bf", label, "-reporterJson", "-reporterHtml", "-reporterCallsOnlyTsv"]
+    cmd = [exe, str(in_dir), "-o", str(out_dir), "-bf", label, "-reporterJson", "-reporterHtml", "-reporterCallsOnlyTsv"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    calls_tsv = next(iter(sorted(out_dir.glob("*.tsv"))), None) if out_dir.exists() else None
+    tsvs = sorted(p for p in out_dir.glob("*.tsv") if not p.name.endswith(".outside.tsv")) if out_dir.exists() else []
+    calls_tsv = tsvs[0] if tsvs else None
     if proc.returncode != 0 or calls_tsv is None:
-        tail = (proc.stderr or proc.stdout or f"exit {proc.returncode}")[-1500:]
+        lines = [ln for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if "bcf_hdr_check_sanity" not in ln]
+        tail = "\n".join(lines)[-2500:].strip() or f"exit {proc.returncode}"
         print(f"[{label}] PharmCAT failed:\n{tail}")
         sys.exit(1)
 
     version = ""
     for line in (proc.stdout + proc.stderr).splitlines():
         if "PharmCAT" in line and any(ch.isdigit() for ch in line):
-            version = line.strip()
+            version = line.strip().removeprefix("PharmCAT version:").strip()
             break
 
     card_rows = pd.read_csv(card_tsv, sep="\t", dtype=str).fillna("").to_dict("records")
-    rows = compare_card_with_pharmcat(card_rows, parse_calls_only_tsv(calls_tsv), outside)
+    tsv_rows = parse_calls_only_tsv(calls_tsv)
+    pheno_json = out_dir / f"{label}.phenotype.json"
+    pc_rows = parse_phenotype_json(pheno_json, tsv_rows) if pheno_json.exists() else tsv_rows
+    rows = compare_card_with_pharmcat(card_rows, pc_rows, outside)
     meta = {
         "run_date": datetime.date.today().isoformat(),
         "pharmcat_version": version or positions.name.removeprefix("pharmcat_positions_").removesuffix(".vcf.bgz"),
@@ -123,7 +131,7 @@ def main() -> None:
         shutil.rmtree(keep)
     keep.mkdir()
     for f in out_dir.iterdir():
-        if f.suffix in (".html", ".json", ".tsv"):
+        if f.suffix in (".html", ".json", ".tsv") and not f.name.endswith(".outside.tsv"):
             shutil.copy2(f, keep / f.name)
     disagree = sum(1 for r in rows if r["status"] == "DISAGREE")
     print(f"[{label}] PharmCAT cross-check written to {rep_dir / 'pharmcat_crosscheck.md'} ({disagree} disagreement(s)).")

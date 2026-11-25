@@ -8,6 +8,7 @@ position stays absent (a no-call), which is safer than PharmCAT's --missing-to-r
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,24 @@ def confirmed_reference_positions(
     return out
 
 
+def _minimal_header(src: pysam.VariantHeader) -> pysam.VariantHeader:
+    """Contigs, FILTERs, GT and the sample only.
+
+    PharmCAT's Java VCF parser rejects backslash-escaped quotes in header descriptions (vendor bcftools
+    filter lines carry them), and it reads nothing beyond GT, so the source header is not copied.
+    """
+    header = pysam.VariantHeader()
+    for name, contig in src.contigs.items():
+        header.contigs.add(name, length=contig.length)
+    for name, flt in src.filters.items():
+        if name != "PASS":
+            desc = (flt.description or name).replace("\\", "").replace('"', "'")
+            header.filters.add(name, None, None, desc)
+    header.formats.add("GT", 1, "String", "Genotype")
+    header.add_sample(list(src.samples)[0])
+    return header
+
+
 def write_pharmcat_input(
     variants_vcf: Path,
     gvcf_path: Path,
@@ -133,7 +152,7 @@ def write_pharmcat_input(
             rows[(contig, pos - 1, (ref, *alts))] = (None, None, [], (0, 0))
             n_fills += 1
 
-        header = vin.header.copy()
+        header = _minimal_header(vin.header)
         sample = list(header.samples)[0]
         tmp = out_vcf.parent / (out_vcf.name.removesuffix(".bgz").removesuffix(".gz") + ".tmp.vcf")
         with pysam.VariantFile(str(tmp), "w", header=header) as vout:
@@ -215,6 +234,42 @@ def parse_calls_only_tsv(path: Path) -> dict[str, dict[str, str]]:
     return rows
 
 
+def _fmt_score(v: Any) -> str:
+    if v in (None, "", "n/a", "No Result"):
+        return ""
+    try:
+        return f"{float(v):g}" if float(v) != int(float(v)) else f"{float(v):.1f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def parse_phenotype_json(path: Path, tsv_rows: dict[str, dict[str, str]] | None = None) -> dict[str, dict[str, str]]:
+    """Read PharmCAT's <name>.phenotype.json into {gene: row}, shaped like the calls-only TSV rows.
+
+    The JSON is the fuller source: the calls-only TSV leaves out genes called from outside calls (HLA)
+    and shows DPYD as its unphased variant list instead of the lowest-function pair CPIC dosing uses.
+    The recommendation diplotypes are read; "Missing positions" (a yes/no flag) comes from the TSV.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows: dict[str, dict[str, str]] = {}
+    for gene, rep in (data.get("geneReports") or {}).items():
+        recs = rep.get("recommendationDiplotypes") or []
+        labels = list(dict.fromkeys(r.get("label") or "" for r in recs if r.get("label")))
+        # one diplotype can carry several phenotypes (HLA-B: one per risk allele); several diplotypes are alternatives
+        per_dip = (", ".join(p for p in (r.get("phenotypes") or []) if p) for r in recs)
+        phenos = [p for p in dict.fromkeys(per_dip) if p]
+        scores = list(dict.fromkeys(s for r in recs if (s := _fmt_score(r.get("activityScore")))))
+        rows[gene] = {
+            "Gene": gene,
+            "Source Diplotype": " OR ".join(labels),
+            "Phenotype": " OR ".join(phenos),
+            "Activity Score": " OR ".join(scores),
+            "Call Source": str(rep.get("callSource") or ""),
+            "Missing positions": ((tsv_rows or {}).get(gene) or {}).get("Missing positions", ""),
+        }
+    return rows
+
+
 _PHENOTYPE_CLASSES: tuple[tuple[str, str], ...] = (
     ("ultrarapid", "Ultrarapid"),
     ("rapid", "Rapid"),
@@ -249,6 +304,16 @@ def _stars(diplotype: str | None) -> list[str]:
     return sorted(re.findall(r"\*\d+[A-Z]?(?:x\d|≥\d)?", diplotype or ""))
 
 
+# CYP4F2 haplotypes carrying rs2108622 T (V433M), the variant CPIC's warfarin guideline uses. PharmCAT
+# names V433M with W12G as *4 and with rs150579280 as *22, while the card checks rs2108622 alone (*3).
+CYP4F2_V433M_ALLELES = {"*3", "*4", "*22"}
+
+
+def _cyp4f2_v433m_count(diplotype: str | None) -> int | None:
+    stars = _stars(diplotype)
+    return None if len(stars) != 2 else sum(1 for s in stars if s in CYP4F2_V433M_ALLELES)
+
+
 def _vkorc1_alt_count(text: str | None, pharmcat: bool) -> int | None:
     t = text or ""
     if pharmcat:
@@ -277,6 +342,8 @@ def compare_card_with_pharmcat(
         }
         if gene in outside_calls:
             row["note"] = f"PharmCAT used our BAM call ({outside_calls[gene]}) as input, so this checks the phenotype translation only."
+        elif gene == "MT-RNR1" and p is not None:
+            row["note"] = "PharmCAT reads MT-RNR1 only from an outside call; the card's own VCF call is not passed to it."
         elif gene in OUTSIDE_CALL_GENES and p is not None:
             row["note"] = "PharmCAT needs an outside call for this gene; none was passed (no confident BAM call)."
         if c is None:
@@ -287,6 +354,14 @@ def compare_card_with_pharmcat(
             a = _vkorc1_alt_count(row["card_diplotype"], pharmcat=False)
             b = _vkorc1_alt_count(row["pharmcat_diplotype"], pharmcat=True)
             row["status"] = _diplotype_status(a, b)
+        elif gene == "CYP4F2":
+            a = _cyp4f2_v433m_count(row["card_diplotype"])
+            b = _cyp4f2_v433m_count(row["pharmcat_diplotype"]) if " OR " not in row["pharmcat_diplotype"] else None
+            row["status"] = _diplotype_status(a, b)
+            if row["status"] == "AGREE" and _stars(row["card_diplotype"]) != _stars(row["pharmcat_diplotype"]):
+                row["status"] = "DIPLOTYPE_DIFFERS"
+                row["note"] = (f"Both show {a} copy(ies) of rs2108622 (V433M), the variant the warfarin guideline uses; "
+                               "PharmCAT also reads other CYP4F2 positions the card does not check.")
         elif gene in DIPLOTYPE_ONLY_GENES:
             row["status"] = _diplotype_status(_stars(row["card_diplotype"]) or None, _stars(row["pharmcat_diplotype"]) or None)
         else:
@@ -294,7 +369,7 @@ def compare_card_with_pharmcat(
             pc_cls = phenotype_class(row["pharmcat_phenotype"])
             if str(c.get("tier", "")).upper() in ("INCOMPLETE", "PARTIAL") or card_cls is None:
                 row["status"] = "CARD_INCOMPLETE"
-            elif pc_cls is None:
+            elif pc_cls is None or " OR " in row["pharmcat_phenotype"]:
                 row["status"] = "PHARMCAT_NO_CALL"
             elif card_cls != pc_cls:
                 row["status"] = "DISAGREE"
@@ -352,9 +427,8 @@ def render_crosscheck_report(sample: str, rows: list[dict[str, Any]], meta: dict
                 pc_bits.append(f"AS={r['pharmcat_activity_score']}")
             pc = " — ".join(pc_bits) or "—"
             note = r["note"]
-            if r["pharmcat_missing_positions"]:
-                n = len([x for x in re.split(r"[,;\s]+", r["pharmcat_missing_positions"]) if x])
-                note = (note + f" {n} defining position(s) had no call.").strip()
+            if r["pharmcat_missing_positions"].strip().lower() == "yes":
+                note = (note + " Some defining positions had no call.").strip()
             md.append(f"| **{r['gene']}** | {card} | {pc} | **{STATUS_TEXT[s]}** | {note} |")
     md.extend([
         "",

@@ -25,6 +25,7 @@ from lib.pharmcat import (
     cyrius_to_outside,
     hla_to_outside,
     parse_calls_only_tsv,
+    parse_phenotype_json,
     render_crosscheck_report,
     write_pharmcat_input,
 )
@@ -620,9 +621,10 @@ def test_bam_report_shows_hla_associations(tmp_path: Path) -> None:
     assert "needs T1K HLA typing" in step10.render_bam_report("t", tmp_path / "t.bam", {}, {}, {}, [], [], None)
 
 
-def _write_vcf(path: Path, body: list[str], contigs: tuple[str, ...] = ("1",), info_end: bool = True) -> Path:
+def _write_vcf(path: Path, body: list[str], contigs: tuple[str, ...] = ("1",), info_end: bool = True,
+               extra_head: tuple[str, ...] = ()) -> Path:
     head = ["##fileformat=VCFv4.2", '##FILTER=<ID=PASS,Description="All filters passed">',
-            '##FILTER=<ID=LowQual,Description="Low quality">']
+            '##FILTER=<ID=LowQual,Description="Low quality">', *extra_head]
     if info_end:
         head += ['##INFO=<ID=END,Number=1,Type=Integer,Description="End">',
                  '##INFO=<ID=MinDP,Number=1,Type=Integer,Description="Min DP">']
@@ -646,7 +648,10 @@ def test_pharmcat_input_fills_only_well_covered_reference(tmp_path: Path) -> Non
         "1\t300\t.\tT\t.\t.\tPASS\tEND=400;MinDP=5\tGT:DP\t0/0:5",
         "1\t401\t.\tG\t.\t.\tLowQual\tEND=450;MinDP=40\tGT:DP\t0/0:40",
     ])
-    variants = _write_vcf(tmp_path / "s.variants.vcf.gz", ["1\t150\t.\tC\tT\t99\tPASS\t.\tGT:DP\t0/1:25"])
+    # Vendor bcftools filter lines escape quotes, which PharmCAT's parser rejects
+    escaped = '##FILTER=<ID=LowDP,Description="Set if true: (CHROM=\\"X\\" && FORMAT/DP<6)">'
+    variants = _write_vcf(tmp_path / "s.variants.vcf.gz", ["1\t150\t.\tC\tT\t99\tPASS\t.\tGT:DP\t0/1:25"],
+                          extra_head=(escaped, '##bcftools_viewCommand=view -e ALT="." in.vcf.gz'))
     positions = _write_vcf(tmp_path / "positions.vcf.gz", [
         "chr1\t120\trsA\tG\tA\t.\tPASS\t.\tGT\t./.",       # inside a 20x 0/0 block -> 0/0
         "chr1\t150\trsB\tC\tT\t.\tPASS\t.\tGT\t./.",       # sample variant -> keep the real call
@@ -666,6 +671,10 @@ def test_pharmcat_input_fills_only_well_covered_reference(tmp_path: Path) -> Non
     with pysam.VariantFile(str(out)) as vf:
         calls = {(r.pos, r.ref): r.samples[0]["GT"] for r in vf}
     assert calls == {(120, "G"): (0, 0), (150, "C"): (0, 1), (198, "GATTA"): (0, 0)}
+    with pysam.VariantFile(str(out)) as vf:
+        head = str(vf.header)
+    assert "\\" not in head and "bcftools_viewCommand" not in head
+    assert "##FILTER=<ID=LowDP," in head
 
     # Male non-PAR chrX uses the 6x hemizygous floor; female chrX keeps 10x
     xgvcf = _write_vcf(tmp_path / "x.genome.vcf.gz", ["X\t5000000\t.\tA\t.\t.\tPASS\tEND=5000100;MinDP=7\tGT:DP\t0:7"], contigs=("X",))
@@ -693,7 +702,7 @@ def test_pharmcat_comparison(tmp_path: Path) -> None:
     lines = ["# PharmCAT calls", "\t".join(cols)] + ["\t".join(r) for r in [
         ["CYP2C19", "*1/*17", "Rapid Metabolizer", "", "no", ""],
         ["CYP2C9", "*1/*2", "Intermediate Metabolizer", "1.5", "no", ""],
-        ["SLCO1B1", "*1/*1", "Normal Function", "", "no", "rs1"],
+        ["SLCO1B1", "*1/*1", "Normal Function", "", "no", "yes"],
         ["TPMT", "*1/*3A OR *3B/*3C", "", "", "no", ""],
         ["VKORC1", "rs9923231 reference (C)/rs9923231 variant (T)", "", "", "no", ""],
         ["CYP4F2", "*1/*3", "", "", "no", ""],
@@ -731,7 +740,46 @@ def test_pharmcat_comparison(tmp_path: Path) -> None:
 
     md = render_crosscheck_report("t", list(rows.values()), {"run_date": "2026-11-25", "variant_records": 3, "reference_fills": 9})
     assert md.index("**CYP2C9**") < md.index("**CYP2C19**")  # disagreements listed first
-    assert "1 defining position(s) had no call" in md
+    assert "Some defining positions had no call" in md
+
+    # CYP4F2 compares copies of rs2108622 (V433M): PharmCAT's *4 is *2+*3 on one haplotype
+    v433m = compare_card_with_pharmcat(
+        [{"gene": "CYP4F2", "diplotype": "*3/*3", "phenotype": "Reduced", "tier": "MODERATE"}],
+        {"CYP4F2": {"Source Diplotype": "*4/*22", "Phenotype": ""}}, {})[0]
+    assert v433m["status"] == "DIPLOTYPE_DIFFERS" and "rs2108622" in v433m["note"]
+
+
+def test_pharmcat_phenotype_json(tmp_path: Path) -> None:
+    def dip(label: str, phenos: list[str], score: object = None) -> dict:
+        return {"label": label, "phenotypes": phenos, "activityScore": score}
+
+    reports = {
+        "DPYD": {"callSource": "MATCHER", "recommendationDiplotypes": [dip("c.1A>G/c.2C>T", ["Normal Metabolizer"], 2.0)]},
+        "HLA-A": {"callSource": "OUTSIDE", "recommendationDiplotypes": [dip("*03:01/*11:01", ["*31:01 negative"])]},
+        "HLA-B": {"callSource": "OUTSIDE", "recommendationDiplotypes": [dip("*13:02/*44:02", ["*57:01 negative", "*58:01 negative"])]},
+        "CYP2D6": {"callSource": "NONE", "recommendationDiplotypes": [dip("Unknown/Unknown", ["No Result"], "No Result")]},
+        "TPMT": {"callSource": "MATCHER", "recommendationDiplotypes": [dip("*1/*3A", ["Intermediate Metabolizer"]),
+                                                                       dip("*3B/*3C", ["Poor Metabolizer"])]},
+    }
+    js = tmp_path / "s.phenotype.json"
+    js.write_text(json.dumps({"geneReports": reports}), encoding="utf-8")
+    pc = parse_phenotype_json(js, {"DPYD": {"Missing positions": "yes"}})
+    assert pc["DPYD"]["Phenotype"] == "Normal Metabolizer" and pc["DPYD"]["Activity Score"] == "2.0"
+    assert pc["DPYD"]["Missing positions"] == "yes" and pc["HLA-A"]["Call Source"] == "OUTSIDE"
+
+    card = [
+        {"gene": "DPYD", "diplotype": "Normal/Normal", "phenotype": "Normal Metabolizer (AS=2.0)", "tier": "NORMAL"},
+        {"gene": "HLA-A", "diplotype": "A*03:01/A*11:01", "phenotype": "Negative for A*31:01", "tier": "NORMAL"},
+        {"gene": "HLA-B", "diplotype": "B*13:02/B*44:02", "phenotype": "Negative for B*57:01, B*58:01", "tier": "NORMAL"},
+        {"gene": "CYP2D6", "diplotype": "*1/*2 (partial)", "phenotype": "Normal Metabolizer", "tier": "NORMAL"},
+        {"gene": "TPMT", "diplotype": "*1/*1", "phenotype": "Normal Metabolizer", "tier": "NORMAL"},
+    ]
+    rows = {r["gene"]: r for r in compare_card_with_pharmcat(card, pc, {"HLA-A": "*03:01/*11:01"})}
+    assert rows["DPYD"]["status"] == "AGREE"
+    assert rows["HLA-A"]["status"] == "AGREE"
+    assert pc["HLA-B"]["Phenotype"] == "*57:01 negative, *58:01 negative" and rows["HLA-B"]["status"] == "AGREE"
+    assert rows["CYP2D6"]["status"] == "PHARMCAT_NO_CALL" and "outside call" in rows["CYP2D6"]["note"]
+    assert rows["TPMT"]["status"] == "PHARMCAT_NO_CALL"
 
 
 def test_t1k_space_free_alignment_links(tmp_path: Path) -> None:
