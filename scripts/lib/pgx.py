@@ -167,6 +167,8 @@ CPIC_HLA_RISK_ALLELES: dict[str, tuple[str, str]] = {
 }
 
 HLA_PGX_GENES: tuple[str, ...] = ("HLA-A", "HLA-B")
+# T1K allele quality below this is flagged as low-confidence (T1K itself only drops quality <= 0).
+HLA_LOW_QUALITY = 5.0
 
 
 def normalize_hla_allele(allele: str | None) -> str | None:
@@ -189,11 +191,22 @@ def interpret_hla_typing(hla: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not hla or hla.get("status") != "OK":
         return []
     genotypes: dict[str, list[str]] = hla.get("genotypes") or {}
+    qualities: dict[str, list[float]] = hla.get("qualities") or {}
     entries: list[dict[str, Any]] = []
     for gene in HLA_PGX_GENES:
-        alleles = [n for n in (normalize_hla_allele(a) for a in genotypes.get(gene, [])) if n]
+        # Each slot is one called allele, or a comma-separated list of candidates T1K could not separate.
+        slots: list[tuple[list[str], float | None]] = []
+        gene_q = qualities.get(gene) or []
+        for i, raw in enumerate(genotypes.get(gene, [])):
+            cands: list[str] = []
+            for c in str(raw).split(","):
+                n = normalize_hla_allele(c)
+                if n and n not in cands:
+                    cands.append(n)
+            if cands:
+                slots.append((cands, gene_q[i] if i < len(gene_q) else None))
         gene_drugs = ", ".join(sorted({d for k, (d, _) in CPIC_HLA_RISK_ALLELES.items() if k.startswith(gene + "*")}))
-        if not alleles:
+        if not slots:
             entries.append({
                 "gene": gene,
                 "diplotype": "No confident call",
@@ -204,19 +217,38 @@ def interpret_hla_typing(hla: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "source": "BAM_T1K",
             })
             continue
-        if len(alleles) == 1:
-            alleles = alleles * 2  # homozygous (T1K reports one distinct allele)
-        dip = "/".join(a.removeprefix("HLA-") for a in alleles)
-        hits = sorted({a for a in alleles if a in CPIC_HLA_RISK_ALLELES})
+        if len(slots) == 1:
+            slots = slots * 2  # homozygous (T1K reports one distinct allele)
+
+        def _label(cands: list[str], q: float | None) -> str:
+            text = cands[0].removeprefix("HLA-")
+            if len(cands) > 1:
+                text += " (tie: " + ", ".join(c.removeprefix("HLA-") for c in cands[1:]) + ")"
+            if q is not None and q < HLA_LOW_QUALITY:
+                text += "?"
+            return text
+
+        dip = "/".join(_label(c, q) for c, q in slots)
+        low_q = sorted({c[0].removeprefix("HLA-") for c, q in slots if q is not None and q < HLA_LOW_QUALITY})
+        low_note = (
+            f" Low-confidence call for {', '.join(low_q)} (T1K quality < {HLA_LOW_QUALITY:g}): confirm with clinical HLA typing before prescribing the listed drugs."
+            if low_q
+            else ""
+        )
+        certain = sorted({c[0] for c, _ in slots if len(c) == 1 and c[0] in CPIC_HLA_RISK_ALLELES})
+        possible = sorted({a for c, _ in slots if len(c) > 1 for a in c if a in CPIC_HLA_RISK_ALLELES} - set(certain))
+        hits = certain + possible
         if hits:
+            labels = [h.removeprefix("HLA-") for h in certain] + [f"possible {h.removeprefix('HLA-')} (tied call)" for h in possible]
             entries.append({
                 "gene": gene,
                 "diplotype": f"{dip} (BAM T1K)",
-                "phenotype": "Positive for " + ", ".join(h.removeprefix("HLA-") for h in hits),
+                "phenotype": "Positive for " + ", ".join(labels),
                 "tier": "ACTIONABLE",
                 "drugs": "; ".join(CPIC_HLA_RISK_ALLELES[h][0] for h in hits),
                 "guidance": " ".join(CPIC_HLA_RISK_ALLELES[h][1] for h in hits)
-                + " Research-grade call: confirm with clinical HLA typing.",
+                + " Research-grade call: confirm with clinical HLA typing."
+                + low_note,
                 "source": "BAM_T1K",
             })
         else:
@@ -227,7 +259,11 @@ def interpret_hla_typing(hla: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "phenotype": f"Negative for {tested}",
                 "tier": "NORMAL",
                 "drugs": gene_drugs,
-                "guidance": "No CPIC HLA risk allele found; standard prescribing for the listed drugs.",
+                "guidance": (
+                    f"No CPIC HLA risk allele called, but {', '.join(low_q)} is a low-confidence call (T1K quality < {HLA_LOW_QUALITY:g}); confirm with clinical HLA typing before prescribing the listed drugs."
+                    if low_q
+                    else "No CPIC HLA risk allele found; standard prescribing for the listed drugs."
+                ),
                 "source": "BAM_T1K",
             })
     return entries

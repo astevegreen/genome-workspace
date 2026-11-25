@@ -502,3 +502,51 @@ def test_hla_t1k_parsing_and_cpic_risk_alleles(tmp_path: Path) -> None:
 
     card = render_pgx_medication_card("t", {"run_date": "2026-11-24"}, list(entries.values()))
     assert "BAM-typed via T1K" in card
+
+
+def test_hla_tied_candidates_and_low_quality(tmp_path: Path) -> None:
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_hla_tie_mod")
+    tsv = tmp_path / "s_genotype.tsv"
+    tsv.write_text(
+        "HLA-A\t2\tHLA-A*01:01\t30.0\t20\tHLA-A*11:99\t5.0\t1\t.\n"
+        "HLA-B\t2\tHLA-B*08:01\t20.0\t12\tHLA-B*57:03,HLA-B*57:01\t13.6\t8\t.\n",
+        encoding="utf-8",
+    )
+    parsed = step10.parse_t1k_genotype(tsv)
+    assert parsed["qualities"]["HLA-A"] == [20.0, 1.0]
+    entries = {e["gene"]: e for e in interpret_hla_typing({"status": "OK", **parsed})}
+
+    # A risk allele inside a tie must not read as negative
+    assert entries["HLA-B"]["tier"] == "ACTIONABLE"
+    assert "possible B*57:01 (tied call)" in entries["HLA-B"]["phenotype"]
+    assert "B*57:03 (tie: B*57:01)" in entries["HLA-B"]["diplotype"]
+
+    # A quality-1 allele is flagged, not silently trusted
+    assert entries["HLA-A"]["tier"] == "NORMAL"
+    assert entries["HLA-A"]["diplotype"].startswith("A*01:01/A*11:99?")
+    assert "A*11:99 is a low-confidence call" in entries["HLA-A"]["guidance"]
+    assert "standard prescribing" not in entries["HLA-A"]["guidance"]
+
+    # Results saved before qualities existed still interpret
+    old = interpret_hla_typing({"status": "OK", "genotypes": parsed["genotypes"]})
+    assert {e["gene"]: e for e in old}["HLA-B"]["tier"] == "ACTIONABLE"
+
+
+def test_t1k_space_free_alignment_links(tmp_path: Path) -> None:
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_space_mod")
+    src_dir = tmp_path / "My Data"
+    src_dir.mkdir()
+    bam = src_dir / "x.bam"
+    bam.write_bytes(b"")
+    (src_dir / "x.bam.bai").write_bytes(b"")
+    out = tmp_path / "t1k"
+    out.mkdir()
+    link = step10._space_free_alignment(bam, out)
+    assert " " not in str(link.relative_to(tmp_path))
+    assert link.resolve() == bam.resolve()
+    assert Path(str(link) + ".bai").resolve() == (src_dir / "x.bam.bai").resolve()
+    # Re-running replaces the links instead of failing
+    assert step10._space_free_alignment(bam, out) == link
+    plain = tmp_path / "plain.bam"
+    plain.write_bytes(b"")
+    assert step10._space_free_alignment(plain, out) == plain.resolve()

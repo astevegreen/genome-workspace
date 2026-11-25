@@ -410,6 +410,7 @@ def parse_t1k_genotype(tsv_path: Path) -> dict[str, Any]:
     Alleles with quality <= 0 are dropped (T1K README recommendation); '.' marks a missing/homozygous slot.
     """
     genotypes: dict[str, list[str]] = {}
+    qualities: dict[str, list[float]] = {}
     rows: list[dict[str, Any]] = []
     with open(tsv_path, encoding="utf-8") as f:
         for line in f:
@@ -420,14 +421,17 @@ def parse_t1k_genotype(tsv_path: Path) -> dict[str, Any]:
                 continue
             gene = cols[0]
             called: list[str] = []
+            called_q: list[float] = []
             for allele, qual in ((cols[2], cols[4]), (cols[5], cols[7])):
                 try:
                     q = float(qual)
                 except ValueError:
                     q = -1.0
                 if allele and allele != "." and q > 0:
-                    called.append(allele)
+                    called.append(allele)  # may be a comma-separated list of tied candidates
+                    called_q.append(q)
             genotypes[gene] = called
+            qualities[gene] = called_q
             rows.append({
                 "gene": gene,
                 "num_diff_alleles": cols[1],
@@ -437,7 +441,31 @@ def parse_t1k_genotype(tsv_path: Path) -> dict[str, Any]:
                 "quality_2": cols[7],
                 "called": "/".join(called) if called else "no confident call",
             })
-    return {"genotypes": genotypes, "rows": rows}
+    return {"genotypes": genotypes, "qualities": qualities, "rows": rows}
+
+
+def _space_free_alignment(bam_path: Path, link_dir: Path) -> Path:
+    """Return a path to the BAM/CRAM with no spaces, symlinking it (and its index) into link_dir if needed.
+
+    run-t1k hands its arguments to a shell unquoted, so a path such as
+    "/mnt/d/My Data/x.bam" splits at the space and bam-extractor crashes.
+    """
+    target = bam_path.resolve()
+    if " " not in str(target):
+        return target
+    link = link_dir / f"input{target.suffix}"
+    for index_suffix in ("", ".bai", ".crai", ".csi"):
+        src = Path(str(target) + index_suffix)
+        dst = Path(str(link) + index_suffix)
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        if src.exists():
+            dst.symlink_to(src)
+    # Also cover "x.bai" (index named without the .bam part)
+    alt_index = target.with_suffix(".bai")
+    if alt_index.exists() and not Path(str(link) + ".bai").exists():
+        Path(str(link) + ".bai").symlink_to(alt_index)
+    return link
 
 
 def run_t1k_hla(
@@ -463,7 +491,7 @@ def run_t1k_hla(
         print(f"[{sample_label}] Running T1K HLA typing (hla-wgs preset)...")
         cmd = [
             t1k_bin,
-            "-b", str(bam_path.resolve()),
+            "-b", str(_space_free_alignment(bam_path, t1k_dir)),
             "-f", str(seq_fa),
             "-c", str(coord_fa),
             "--preset", "hla-wgs",
@@ -487,6 +515,7 @@ def run_t1k_hla(
         "status": "OK",
         "tool": "T1K (--preset hla-wgs)",
         "genotypes": parsed["genotypes"],
+        "qualities": parsed["qualities"],
         "rows": parsed["rows"],
         "output_tsv": str(geno_tsv),
     }
