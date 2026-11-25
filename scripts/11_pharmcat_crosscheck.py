@@ -99,7 +99,10 @@ def main() -> None:
     print(f"[{label}] Running PharmCAT (outside calls: {', '.join(sorted(outside)) or 'none'})...")
     out_dir = work / "out"
     cmd = [exe, str(in_dir), "-o", str(out_dir), "-bf", label, "-reporterJson", "-reporterHtml", "-reporterCallsOnlyTsv"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # PharmCAT's bundled logback.xml writes pharmcat.log (and daily rollovers) to a relative path, i.e. into the
+    # working directory, so run it from the work dir: the log stays in data/processed/<label>/pharmcat/ instead
+    # of the repo root. All paths in cmd are absolute, and pharmcat.jar is found next to the pipeline script.
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=work)
     tsvs = sorted(p for p in out_dir.glob("*.tsv") if not p.name.endswith(".outside.tsv")) if out_dir.exists() else []
     calls_tsv = tsvs[0] if tsvs else None
     if proc.returncode != 0 or calls_tsv is None:

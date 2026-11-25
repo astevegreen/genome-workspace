@@ -8,6 +8,7 @@ dependencies = [
     "pandas>=2.2.0",
     "requests>=2.32.0",
     "pytest>=8.0.0",
+    "markdown>=3.7",
 ]
 
 [tool.uv]
