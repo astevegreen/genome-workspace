@@ -46,6 +46,7 @@ from lib.pgx import (
     interpret_pgx_profile,
     render_pgx_medication_card,
 )
+from lib.alignment import caller_cram_problem, is_cram, open_alignment, t1k_input_bam
 from lib.ugt1a1 import analyze_ta_repeat, counts_label
 
 REPO_ROOT = SCRIPT_DIR.parent
@@ -139,7 +140,7 @@ def get_sample_sex(sample_label: str) -> str:
 
 
 def detect_bam_has_chr(bam_path: Path) -> bool:
-    with pysam.AlignmentFile(str(bam_path), "rb") as af:
+    with open_alignment(bam_path) as af:
         refs = set(af.references[:30])
     return "chr1" in refs
 
@@ -169,6 +170,9 @@ def run_expansion_hunter(
         return {"status": "TOOL_NOT_FOUND", "error": "ExpansionHunter not found in PATH or ~/.local/bin"}
     if not fasta_path.exists():
         return {"status": "MISSING_REFERENCE", "error": f"Reference FASTA not found: {fasta_path}"}
+    cram_problem = caller_cram_problem(bam_path)
+    if cram_problem:
+        return {"status": "UNSUPPORTED_CRAM", "error": cram_problem}
 
     tools_dir = Path(os.environ.get("WGS_TOOLS_DIR", str(DEFAULT_TOOLS_DIR)))
     eh_cat_dir = tools_dir / "ExpansionHunter-v5.0.0-linux_x86_64" / "variant_catalog" / "grch38"
@@ -306,7 +310,9 @@ def parse_smn_results(tsv_path: Path, json_path: Path) -> dict[str, Any]:
     }
 
 
-def run_smn_caller(bam_path: Path, out_dir: Path, sample_label: str, threads: int) -> dict[str, Any]:
+def run_smn_caller(
+    bam_path: Path, out_dir: Path, sample_label: str, threads: int, fasta_path: Path | None = None
+) -> dict[str, Any]:
     smn_bin = find_tool("smn_caller.py")
     if not smn_bin:
         return {"status": "TOOL_NOT_FOUND", "error": "smn_caller.py not found in PATH or ~/.local/bin"}
@@ -329,6 +335,8 @@ def run_smn_caller(bam_path: Path, out_dir: Path, sample_label: str, threads: in
             "--outDir", str(smn_dir),
             "--threads", str(threads),
         ]
+        if is_cram(bam_path) and fasta_path is not None and fasta_path.exists():
+            cmd += ["--reference", str(fasta_path.resolve())]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0 or not tsv_path.exists():
             return {
@@ -341,7 +349,9 @@ def run_smn_caller(bam_path: Path, out_dir: Path, sample_label: str, threads: in
     return parse_smn_results(tsv_path, json_path)
 
 
-def run_cyrius(bam_path: Path, out_dir: Path, sample_label: str, threads: int) -> dict[str, Any]:
+def run_cyrius(
+    bam_path: Path, out_dir: Path, sample_label: str, threads: int, fasta_path: Path | None = None
+) -> dict[str, Any]:
     cyrius_bin = find_tool("star_caller.py")
     if not cyrius_bin:
         return {"status": "TOOL_NOT_FOUND", "error": "star_caller.py not found in PATH or ~/.local/bin"}
@@ -364,6 +374,8 @@ def run_cyrius(bam_path: Path, out_dir: Path, sample_label: str, threads: int) -
             "--outDir", str(cyp_dir),
             "--threads", str(threads),
         ]
+        if is_cram(bam_path) and fasta_path is not None and fasta_path.exists():
+            cmd += ["--reference", str(fasta_path.resolve())]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0 or not tsv_path.exists():
             return {
@@ -476,7 +488,7 @@ def _space_free_alignment(bam_path: Path, link_dir: Path) -> Path:
 
 
 def run_t1k_hla(
-    bam_path: Path, out_dir: Path, sample_label: str, threads: int, has_chr: bool
+    bam_path: Path, out_dir: Path, sample_label: str, threads: int, has_chr: bool, fasta_path: Path | None = None
 ) -> dict[str, Any]:
     """Run T1K (--preset hla-wgs) on the BAM for two-field HLA typing."""
     t1k_bin = find_tool("run-t1k")
@@ -496,9 +508,17 @@ def run_t1k_hla(
 
     if not geno_tsv.exists():
         print(f"[{sample_label}] Running T1K HLA typing (hla-wgs preset)...")
+        t1k_bam = bam_path
+        if is_cram(bam_path):
+            # T1K's bam-extractor cannot read CRAM: give it a BAM of the reads its whole-file scan would pick
+            print(f"[{sample_label}] Extracting the T1K input reads from the CRAM into a temporary BAM...")
+            try:
+                t1k_bam = t1k_input_bam(bam_path, coord_fa, t1k_dir, fasta_path, threads)
+            except RuntimeError as e:
+                return {"status": "ERROR", "error": str(e)}
         cmd = [
             t1k_bin,
-            "-b", str(_space_free_alignment(bam_path, t1k_dir)),
+            "-b", str(_space_free_alignment(t1k_bam, t1k_dir)),
             "-f", str(seq_fa),
             "-c", str(coord_fa),
             "--preset", "hla-wgs",
@@ -615,7 +635,7 @@ def classify_sv_bam_support(
 
 
 def verify_exonic_svs_in_bam(
-    bam_path: Path, sv_tsv: Path, has_chr: bool
+    bam_path: Path, sv_tsv: Path, has_chr: bool, reference: Path | None = None
 ) -> list[dict[str, Any]]:
     """Inspect BAM depth ratio, MAPQ, clipped reads, and discordant pairs for exonic SVs."""
     if not sv_tsv.exists():
@@ -625,7 +645,7 @@ def verify_exonic_svs_in_bam(
         return []
 
     rows: list[dict[str, Any]] = []
-    with pysam.AlignmentFile(str(bam_path), "rb") as af:
+    with open_alignment(bam_path, reference) as af:
         ref_lens = dict(zip(af.references, af.lengths))
         for _, rec in df.iterrows():
             raw_chrom = str(rec["chrom"])
@@ -750,7 +770,7 @@ def check_pair_phasing_in_bam(
 
 
 def check_candidate_phasing(
-    bam_path: Path, rep_dir: Path, has_chr: bool
+    bam_path: Path, rep_dir: Path, has_chr: bool, reference: Path | None = None
 ) -> list[dict[str, Any]]:
     """Check read-backed phasing for any candidate compound hets + double-het MTHFR."""
     pairs_to_check: list[dict[str, Any]] = []
@@ -814,7 +834,7 @@ def check_candidate_phasing(
     if not pairs_to_check:
         return results
 
-    with pysam.AlignmentFile(str(bam_path), "rb") as af:
+    with open_alignment(bam_path, reference) as af:
         for pair in pairs_to_check:
             raw_c = pair["chrom"]
             chrom = f"chr{raw_c}" if (has_chr and not raw_c.startswith("chr")) else raw_c.removeprefix("chr")
@@ -1118,16 +1138,16 @@ def main() -> None:
     fasta_path = Path(args.reference)
 
     eh_res = run_expansion_hunter(bam_path, fasta_path, sex, work_dir, sample_label, args.threads, has_chr)
-    smn_res = run_smn_caller(bam_path, work_dir, sample_label, args.threads)
-    cyrius_res = run_cyrius(bam_path, work_dir, sample_label, args.threads)
-    hla_res = run_t1k_hla(bam_path, work_dir, sample_label, args.threads, has_chr)
+    smn_res = run_smn_caller(bam_path, work_dir, sample_label, args.threads, fasta_path)
+    cyrius_res = run_cyrius(bam_path, work_dir, sample_label, args.threads, fasta_path)
+    hla_res = run_t1k_hla(bam_path, work_dir, sample_label, args.threads, has_chr, fasta_path)
     print(f"[{sample_label}] Counting the UGT1A1 promoter TA repeat from spanning reads...")
-    ugt_res = analyze_ta_repeat(bam_path, has_chr)
+    ugt_res = analyze_ta_repeat(bam_path, has_chr, reference=fasta_path)
 
     print(f"[{sample_label}] Verifying coding-exon SVs in BAM...")
-    sv_rows = verify_exonic_svs_in_bam(bam_path, rep_dir / "cnv_sv_exonic_clinical.tsv", has_chr)
+    sv_rows = verify_exonic_svs_in_bam(bam_path, rep_dir / "cnv_sv_exonic_clinical.tsv", has_chr, fasta_path)
     print(f"[{sample_label}] Checking read-backed phasing for candidate compound hets...")
-    phasing_rows = check_candidate_phasing(bam_path, rep_dir, has_chr)
+    phasing_rows = check_candidate_phasing(bam_path, rep_dir, has_chr, fasta_path)
 
     payload = {
         "sample": sample_label,

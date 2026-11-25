@@ -22,7 +22,7 @@ Reports are written to `results/reports/<sample>/` and `results/reports/couple/`
 ## Directory Structure
 - `config/` — Sample registry (`samples.tsv.example` committed; `samples.tsv` gitignored).
 - `data/processed/<sample>/` — `bgzip`-compressed, `tabix`-indexed, and normalized personal VCFs.
-- `data/alignments/<sample>/` — Reserved for BAM/CRAM/FASTQ + index files (planned upload).
+- `data/alignments/<sample>/` — BAM or CRAM + index (symlinks to the external drive). `scripts/bam_to_cram.sh` converts a BAM to a verified CRAM; see [docs/storage_backup.md](docs/storage_backup.md) for the conversion and backup checklist.
 - `data/reference/` — ClinVar GRCh38, GenCC MOI, GRCh38 FASTA, GENCODE v46 CDS BED, and local API cache (`api_cache.json`).
 - `scripts/` — Reproducible pipeline entry points (`run_annual_checkup.sh`, `setup_references.sh`, `run_sample.sh`, `04`–`08`) and shared Python library (`scripts/lib/`).
 - `tests/` — Automated unit tests (`pytest`).

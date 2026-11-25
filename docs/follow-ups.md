@@ -32,7 +32,9 @@ Build items agreed on 25 Nov 2026, in order. Tick each off with the commit that 
    disagreement. A 30x genome gives only 10-25 spanning pairs, so some samples stay unresolved and need a clinical
    UGT1A1 test.
 6. [ ] **Storage and backup (owner).** Convert the BAMs to CRAM (about half the size) and keep a second copy off the
-   external D: drive.
+   external D: drive. `scripts/bam_to_cram.sh` now converts and verifies each BAM (no-reference CRAM 3.0, about
+   two-thirds of the size), and Steps 3 and 10 read CRAMs. The run checklist and the second-copy steps are in
+   [storage_backup.md](storage_backup.md). Tick this once both CRAMs are verified and a verified copy exists off D:.
 7. [ ] **Stop tracking `pharmcat.log`.** PharmCAT appends to it at the repo root on every Step 11 run (sample labels
    and local paths) and it is tracked in this public repo: `git rm --cached pharmcat.log`, add it to `.gitignore`,
    or have Step 11 run PharmCAT with its log inside `data/processed/<label>/pharmcat/`.

@@ -49,14 +49,16 @@ def ta_units(read_seq: str) -> int | None | str:
     return len(middle) // 2 - 1  # A(TA)nTAA reads as (AT)x(n+1) between the anchors
 
 
-def count_ta_repeats(bam_path: Path, has_chr: bool = False, min_mapq: int = MIN_MAPQ) -> dict[str, Any]:
-    """Count TA repeat lengths over read pairs that fully span the repeat with both anchors."""
-    import pysam
+def count_ta_repeats(
+    bam_path: Path, has_chr: bool = False, min_mapq: int = MIN_MAPQ, reference: Path | None = None
+) -> dict[str, Any]:
+    """Count TA repeat lengths over read pairs that fully span the repeat with both anchors (BAM or CRAM)."""
+    from lib.alignment import open_alignment
 
     chrom = f"chr{UGT1A1_CHROM}" if has_chr else UGT1A1_CHROM
     per_fragment: dict[str, int | str] = {}
     partial = 0
-    with pysam.AlignmentFile(str(bam_path), "rb") as af:
+    with open_alignment(bam_path, reference) as af:
         for r in af.fetch(chrom, UGT1A1_TA_POS - FETCH_PAD, UGT1A1_TA_POS + FETCH_PAD):
             if r.is_unmapped or r.is_duplicate or r.is_secondary or r.is_supplementary or r.is_qcfail:
                 continue
@@ -141,10 +143,10 @@ def counts_label(counts: dict[Any, Any]) -> str:
     return ", ".join(f"TA{k} x{v}" for k, v in sorted(((int(k), v) for k, v in (counts or {}).items())))
 
 
-def analyze_ta_repeat(bam_path: Path, has_chr: bool = False) -> dict[str, Any]:
+def analyze_ta_repeat(bam_path: Path, has_chr: bool = False, reference: Path | None = None) -> dict[str, Any]:
     """Step 10 entry point: read counts plus the diplotype call."""
     try:
-        reads = count_ta_repeats(bam_path, has_chr)
+        reads = count_ta_repeats(bam_path, has_chr, reference=reference)
     except (OSError, ValueError) as e:
         return {"status": "ERROR", "error": str(e)}
     call = call_ta_diplotype(reads["counts"])
