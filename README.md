@@ -12,7 +12,7 @@ bash scripts/run_annual_checkup.sh --refresh-refs
 bash scripts/run_annual_checkup.sh
 ```
 
-Reports are written to `results/reports/<sample>/` and `results/reports/couple/` (including the auto-generated `plain_language_summary.md`). Step 12 renders a `.pdf` beside every report `.md` with headless Chrome, Edge or Chromium (the Windows builds work from WSL).
+Reports are written to `results/reports/<sample>/` and `results/reports/couple/` (including the auto-generated `plain_language_summary.md`). Each annual run also writes a per-sample snapshot to `data/snapshots/` and a `changes_since_last_run.md` report against the previous year (Step 13). Step 12 renders a `.pdf` beside every report `.md` with headless Chrome, Edge or Chromium (the Windows builds work from WSL).
 
 ## Privacy & Read-Only Policy
 - Raw source directories configured in `config/samples.tsv` are treated as **strictly read-only**.
