@@ -55,8 +55,9 @@ bash scripts/setup_prs_references.sh
 - **Local API Cache (`data/reference/api_cache.json`):**
   - gnomAD v4 and Ensembl VEP responses are cached locally on disk so re-runs are fast and never confuse API timeouts with `"absent"`. Delete `data/reference/api_cache.json` if you ever want to force a fresh remote lookup.
 
-## 4. Planned BAM / CRAM Alignment Workflow (Future Upload)
-When raw alignment files are uploaded locally, place them in `data/alignments/<sample>/` (gitignored):
+## 4. BAM / CRAM Alignment Workflow
+Place alignment files (or symlinks to them) in `data/alignments/<sample>/` (gitignored). Steps 3 and 10 use the
+first `*.bam`, else the first `*.cram`:
 - `data/alignments/partner_a/<sample>.cram` + `.cram.crai` (or `.bam` + `.bam.bai`)
 - `data/alignments/partner_b/<sample>.cram` + `.cram.crai`
 
@@ -67,6 +68,16 @@ Having BAM/CRAM alignments locally will unlock:
 4. **HLA Typing (*HLA-A*/*-B* CPIC hypersensitivity alleles `B*57:01`, `B*58:01`, `B*15:02`, `A*31:01`):** `T1K` (`--preset hla-wgs`), installed with its IPD-IMGT/HLA index by `bash scripts/setup_bam_tools.sh`. The same typing also gives celiac HLA-DQ2/DQ8 and HLA-B27 associations (Step 10 report, section 7).
 5. ***UGT1A1\*28* Promoter TA Repeat (rs3064744; irinotecan, atazanavir):** counted in Step 10 (section 8) from read pairs that carry both flanking anchors (TA5 = \*36, TA6 = \*1, TA7 = \*28, TA8 = \*37). The diplotype is called only with >= 10 spanning read pairs and a log10 likelihood ratio >= 2 over the next-best pair (2% stutter model); the medication card combines it with the VCF's \*6, and Step 11 compares it with PharmCAT, whose UGT1A1 call otherwise rests on a gVCF reference block across the repeat.
 6. **Visual Read-Level Verification & Cis/Trans Phasing:** `samtools tview` / IGV for any shared exonic SV calls (Section 2b of the couple report) or potential compound heterozygotes.
+
+**CRAM input.** `scripts/bam_to_cram.sh <bam>` writes a no-reference CRAM 3.0 next to the BAM's real file and checks
+it against the BAM (quickcheck, flagstat, idxstats, `samtools checksum -a`, region counts); it never changes the BAM.
+Every Step 3 and Step 10 tool gives the same results on that CRAM as on the BAM. Two need workarounds
+(`scripts/lib/alignment.py`):
+- ExpansionHunter needs CRAM 3.0 rather than 3.1.
+- T1K cannot read CRAM, so Step 10 passes it a temporary BAM of the HLA region, the decoy contigs and the unmapped
+  reads.
+
+Why the CRAM is not reference-based, and the backup checklist: [storage_backup.md](storage_backup.md).
 
 ## 5. PharmCAT Cross-Check of the Medication Card (Step 11)
 

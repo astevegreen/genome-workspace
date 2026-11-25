@@ -21,12 +21,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pysam
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.alignment import index_stats, open_alignment
 from lib.identity import (
     QC_JSON,
     QC_MD,
@@ -117,10 +117,11 @@ def main() -> None:
     else:
         fp = alignment_fingerprint(bam)
         vcf_mtime = int(vcf.stat().st_mtime)
-        with pysam.AlignmentFile(str(bam)) as af:
+        with open_alignment(bam, Path(args.reference)) as af:
             has_chr = "chr1" in set(af.references[:30])
-            stats = [(s.contig, af.get_reference_length(s.contig), s.mapped) for s in af.get_index_statistics()]
             rg_samples = sorted({rg.get("SM", "") for rg in af.header.to_dict().get("RG", []) if rg.get("SM")})
+        # a .crai has no per-contig counts (pysam returns zeros for a CRAM), so CRAMs go through samtools idxstats
+        stats = index_stats(bam)
         with open(qc_dir / "bam.idxstats.tsv", "w", encoding="utf-8", newline="\n") as fh:
             for contig, length, mapped in stats:
                 fh.write(f"{contig}\t{length}\t{mapped}\t0\n")
