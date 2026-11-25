@@ -9,8 +9,11 @@ Runs specialized short-read alignment callers on data/alignments/<label>/*.{bam,
   5. BAM Read-Backed Phasing (cis vs. trans via shared reads / read pairs) for candidate compound hets
   6. T1K: HLA class I/II typing (two-field) for CPIC drug-hypersensitivity alleles
   7. HLA disease associations from the same typing: celiac (HLA-DQ2/DQ8) and HLA-B27
+  8. UGT1A1 promoter TA repeat (*28 / *36 / *37), counted from reads that span it
 
-Also upgrades results/reports/<label>/pgx_medication_card.{md,tsv} with Cyrius CYP2D6 and T1K HLA calls.
+Runs only after Step 3 (scripts/03_sample_identity_qc.py) has matched this alignment to the sample's VCF.
+
+Also upgrades results/reports/<label>/pgx_medication_card.{md,tsv} with Cyrius CYP2D6, T1K HLA and UGT1A1 TA-repeat calls.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.genomics import get_reference_metadata, normalize_gt_unphased, read_sample_sex
 from lib.hla_traits import interpret_hla_associations
+from lib.identity import bam_verified, identity_line, load_identity_qc
 from lib.pgx import (
     HLA_PGX_GENES,
     interpret_cyp2d6_cyrius,
@@ -42,6 +46,7 @@ from lib.pgx import (
     interpret_pgx_profile,
     render_pgx_medication_card,
 )
+from lib.ugt1a1 import analyze_ta_repeat, counts_label
 
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_TOOLS_DIR = Path.home() / ".local" / "opt" / "wgs_tools"
@@ -831,12 +836,16 @@ def render_bam_report(
     sv_rows: list[dict[str, Any]],
     phasing_rows: list[dict[str, Any]],
     hla_res: dict[str, Any] | None = None,
+    ugt_res: dict[str, Any] | None = None,
+    identity_qc: dict[str, Any] | None = None,
 ) -> str:
     today = datetime.date.today().isoformat()
     md = [
         f"# BAM-Based Blind-Spot & Read-Level Verification Report — {sample_label.title()}",
         "",
         f"**Run Date:** {today} | **Alignment:** `{bam_path.name}`",
+        "",
+        identity_line(identity_qc) + " (details: `sample_identity_qc.md`)",
         "",
         "> **Clinical Disclaimer:** Research-grade BAM bioinformatics analysis (ExpansionHunter, SMNCopyNumberCaller, Cyrius, T1K). "
         "Confirm any actionable or reproductive finding via a CLIA-certified clinical laboratory before medical decisions.",
@@ -992,7 +1001,37 @@ def render_bam_report(
     else:
         md.append("_Unavailable: needs T1K HLA typing (section 6)._")
 
+    md.extend(["", "## 8. *UGT1A1* Promoter TA Repeat (\\*28, rs3064744)", ""])
+    md.extend(render_ugt1a1_section(ugt_res))
     return "\n".join(md) + "\n"
+
+
+def render_ugt1a1_section(ugt: dict[str, Any] | None) -> list[str]:
+    ugt = ugt or {"status": "NOT_RUN"}
+    if "counts" not in ugt:
+        return [f"_Unavailable: {ugt.get('status')} ({ugt.get('error', '')})_"]
+    if ugt["status"] == "OK":
+        verdict = f"**{ugt['diplotype']}**"
+    elif ugt["status"] == "LOW_DEPTH":
+        verdict = f"**No call:** fewer than {ugt['min_spanning']} spanning read pairs"
+    else:
+        verdict = "**Not resolved:** " + " or ".join(f"`{c}`" for c in ugt.get("candidate_labels") or [])
+    lod = "—" if ugt.get("lod") is None else f"{ugt['lod']}"
+    return [
+        "| Metric | Result |",
+        "|---|---|",
+        f"| **Repeat lengths (read pairs spanning both anchors)** | {counts_label(ugt['counts']) or 'none'} |",
+        f"| **Spanning read pairs** | {ugt['spanning_fragments']} (minimum {ugt['min_spanning']}) |",
+        f"| **Reads lacking an anchor / non-(TA)n / mates disagreeing** | {ugt['partial_reads']} / "
+        f"{ugt['noncanonical_fragments']} / {ugt['mate_conflict_fragments']} |",
+        f"| **Diplotype** | {verdict} |",
+        f"| **Confidence (log10 likelihood ratio, best vs next)** | {lod} (a call needs >= {ugt['min_lod']}) |",
+        "",
+        "_TA5 = \\*36, TA6 = \\*1 (reference), TA7 = \\*28, TA8 = \\*37. \\*28 and \\*37 lower UGT1A1 activity "
+        "(irinotecan toxicity, atazanavir jaundice, Gilbert syndrome). Research-grade read count: a 30x genome gives "
+        "only about 10-25 spanning read pairs, so an unresolved call needs a clinical UGT1A1 test. The medication card "
+        "combines this call with the VCF's \\*6 call._",
+    ]
 
 
 def refresh_pgx_card_with_bam(
@@ -1001,19 +1040,38 @@ def refresh_pgx_card_with_bam(
     cyrius_res: dict[str, Any],
     hla_res: dict[str, Any],
     sex: str,
+    ugt_res: dict[str, Any] | None = None,
 ) -> None:
-    """Re-render pgx_medication_card.{md,tsv} with BAM-resolved Cyrius CYP2D6 and T1K HLA calls."""
+    """Re-render pgx_medication_card.{md,tsv} with BAM-resolved Cyrius CYP2D6, T1K HLA and UGT1A1 TA-repeat calls."""
     tm_tsv = rep_dir / "targeted_markers.tsv"
-    if not tm_tsv.exists() or (cyrius_res.get("status") != "OK" and hla_res.get("status") != "OK"):
+    bam_calls = cyrius_res.get("status") == "OK" or hla_res.get("status") == "OK" or "counts" in (ugt_res or {})
+    if not tm_tsv.exists() or not bam_calls:
         return
     df = pd.read_csv(tm_tsv, sep="\t", dtype={"gt": str})
     marker_rows = df.to_dict("records")
-    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_res, sex=sex, hla=hla_res)
+    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_res, sex=sex, hla=hla_res, ugt1a1_ta=ugt_res)
     pd.DataFrame(pgx_entries).to_csv(rep_dir / "pgx_medication_card.tsv", sep="\t", index=False)
     ref_meta = get_reference_metadata(REPO_ROOT / "data" / "reference")
     card_md = render_pgx_medication_card(sample_label, ref_meta, pgx_entries)
     (rep_dir / "pgx_medication_card.md").write_text(card_md, encoding="utf-8")
-    print(f"[{sample_label}] Updated PGx Medication Card with BAM calls (Cyrius {cyrius_res.get('status')}, T1K {hla_res.get('status')}).")
+    print(f"[{sample_label}] Updated PGx Medication Card with BAM calls (Cyrius {cyrius_res.get('status')}, "
+          f"T1K {hla_res.get('status')}, UGT1A1 TA repeat {(ugt_res or {}).get('status')}).")
+
+
+def reset_caller_cache_if_alignment_changed(work_dir: Path, bam_path: Path, sample_label: str) -> None:
+    """The callers reuse their outputs in work_dir; drop them when the alignment link now points at another file."""
+    stamp = work_dir / "alignment.json"
+    current = {"alignment_target": os.path.realpath(bam_path), "size": bam_path.stat().st_size}
+    if work_dir.exists() and stamp.exists():
+        try:
+            previous = json.loads(stamp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        if previous != current:
+            print(f"[{sample_label}] Alignment changed since the cached caller outputs were made; re-running all callers.")
+            shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(json.dumps(current) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -1043,8 +1101,17 @@ def main() -> None:
 
     rep_dir = REPO_ROOT / "results" / "reports" / sample_label
     work_dir = REPO_ROOT / "data" / "processed" / sample_label / "bam_callers"
+    verified, why = bam_verified(rep_dir, bam_path)
+    if not verified:
+        print(
+            f"[{sample_label}] ERROR: Step 10 refuses to run: {why}. Run "
+            f"'.venv-wsl/bin/python scripts/03_sample_identity_qc.py --sample {sample_label}' and fix any mismatch first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    identity_qc = load_identity_qc(rep_dir)
     rep_dir.mkdir(parents=True, exist_ok=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    reset_caller_cache_if_alignment_changed(work_dir, bam_path, sample_label)
 
     sex = get_sample_sex(sample_label)
     has_chr = detect_bam_has_chr(bam_path)
@@ -1054,6 +1121,8 @@ def main() -> None:
     smn_res = run_smn_caller(bam_path, work_dir, sample_label, args.threads)
     cyrius_res = run_cyrius(bam_path, work_dir, sample_label, args.threads)
     hla_res = run_t1k_hla(bam_path, work_dir, sample_label, args.threads, has_chr)
+    print(f"[{sample_label}] Counting the UGT1A1 promoter TA repeat from spanning reads...")
+    ugt_res = analyze_ta_repeat(bam_path, has_chr)
 
     print(f"[{sample_label}] Verifying coding-exon SVs in BAM...")
     sv_rows = verify_exonic_svs_in_bam(bam_path, rep_dir / "cnv_sv_exonic_clinical.tsv", has_chr)
@@ -1071,6 +1140,8 @@ def main() -> None:
         "cyrius_cyp2d6": cyrius_res,
         "hla_t1k": hla_res,
         "hla_associations": interpret_hla_associations(hla_res),
+        "ugt1a1_ta_repeat": ugt_res,
+        "identity_qc": {k: (identity_qc or {}).get(k) for k in ("status", "summary", "run_date")},
         "sv_verification": sv_rows,
         "phasing_checks": phasing_rows,
     }
@@ -1085,13 +1156,13 @@ def main() -> None:
         pd.DataFrame(payload["hla_associations"]).to_csv(rep_dir / "hla_disease_associations.tsv", sep="\t", index=False)
 
     report_md = render_bam_report(
-        sample_label, bam_path, eh_res, smn_res, cyrius_res, sv_rows, phasing_rows, hla_res
+        sample_label, bam_path, eh_res, smn_res, cyrius_res, sv_rows, phasing_rows, hla_res, ugt_res, identity_qc
     )
     out_md = rep_dir / "bam_blind_spots_report.md"
     out_md.write_text(report_md, encoding="utf-8")
     print(f"[{sample_label}] BAM blind-spot report written to {out_md}")
 
-    refresh_pgx_card_with_bam(sample_label, rep_dir, cyrius_res, hla_res, sex)
+    refresh_pgx_card_with_bam(sample_label, rep_dir, cyrius_res, hla_res, sex, ugt_res)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from .genomics import normalize_gt_unphased
+from .ugt1a1 import counts_label, interpret_ugt1a1
 
 # CPIC 2019 consensus CYP2D6 allele activity values (PharmVar / CPIC)
 _CYP2D6_ALLELE_AV: dict[str, float] = {
@@ -428,12 +429,14 @@ def interpret_pgx_profile(
     cyrius_cyp2d6: dict[str, Any] | None = None,
     sex: str = "",
     hla: dict[str, Any] | None = None,
+    ugt1a1_ta: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Map targeted PGx marker rows (from 07_deep_analysis.py) into structured CPIC
     diplotype, phenotype, actionability tier, affected drug classes, and clinical notes.
 
-    `sex` ('M'/'F') drives X-linked G6PD calls; `hla` is the Step 10 T1K payload.
+    `sex` ('M'/'F') drives X-linked G6PD calls; `hla` is the Step 10 T1K payload;
+    `ugt1a1_ta` is the Step 10 UGT1A1 promoter TA-repeat count (*28 / *36 / *37).
     """
     by_rs = {str(r["rsid"]): r for r in marker_rows}
     results: list[dict[str, Any]] = []
@@ -742,9 +745,17 @@ def interpret_pgx_profile(
                 "guidance": "Standard dosing.",
             })
 
-    # 9. UGT1A1 (*6 only; *28 TA-repeat requires BAM/clinical assay)
+    # 9. UGT1A1: *6 from the VCF; *28 / *36 / *37 from the Step 10 BAM TA-repeat count when it made a call
     d_ugt = _d("rs4148323")
-    if d_ugt is not None:
+    ta = ugt1a1_ta or {}
+    ta_note = ""
+    if "counts" in ta and ta.get("status") != "OK":
+        why = "too few spanning read pairs" if ta.get("status") == "LOW_DEPTH" else "not decisive"
+        ta_note = (f" BAM TA-repeat count {why}: {counts_label(ta['counts']) or 'no spanning reads'} "
+                   f"over {ta.get('spanning_fragments', 0)} read pairs.")
+    if ta.get("status") == "OK" and ta.get("alleles"):
+        results.append(interpret_ugt1a1(d_ugt, ta))
+    elif d_ugt is not None:
         if d_ugt >= 1:
             u_dip = "*6/*6" if d_ugt == 2 else "*1/*6"
             results.append({
@@ -752,7 +763,7 @@ def interpret_pgx_profile(
                 "phenotype": "Poor Metabolizer" if d_ugt == 2 else "Intermediate Metabolizer",
                 "tier": "ACTIONABLE" if d_ugt == 2 else "MODERATE",
                 "drugs": "Irinotecan, atazanavir",
-                "guidance": "Increased neutropenia/hyperbilirubinemia risk (note: *28 promoter TA-repeat is not resolved by standard VCFs).",
+                "guidance": "Increased neutropenia/hyperbilirubinemia risk (note: *28 promoter TA-repeat is not resolved by standard VCFs)." + ta_note,
             })
         else:
             results.append({
@@ -760,7 +771,7 @@ def interpret_pgx_profile(
                 "phenotype": "Partial — *6 Negative",
                 "tier": "PARTIAL",
                 "drugs": "Irinotecan, atazanavir",
-                "guidance": "Negative for *6; clinical test needed to rule out *28 TA-repeat before irinotecan/atazanavir.",
+                "guidance": "Negative for *6; clinical test needed to rule out *28 TA-repeat before irinotecan/atazanavir." + ta_note,
             })
 
     # 10. BCHE (Succinylcholine / mivacurium)
@@ -904,11 +915,21 @@ def render_pgx_medication_card(
         "`HLA-B*58:01` allopurinol, `HLA-A*31:01` carbamazepine) need HLA typing: run `scripts/setup_bam_tools.sh` (installs T1K) and Step 10, or use clinical HLA testing."
     )
 
+    ugt_bam = any(e.get("gene") == "UGT1A1" and e.get("source") == "BAM_TA_REPEAT" for e in pgx_entries)
+    ugt_limitation = (
+        "- ***UGT1A1\\*28* TA-repeat (BAM read count):** The promoter `(TA)n` repeat was counted from 30x WGS reads that span it "
+        "(Step 10, section 8). Only 10-25 read pairs usually span it, so treat the call as research-grade and confirm before "
+        "irinotecan. \\*80 (rs887829) and other rare alleles are not assessed."
+        if ugt_bam
+        else "- ***UGT1A1\\*28* TA-repeat:** Promoter `(TA)7` repeat expansion is not reliably called in standard short-read SNV VCFs; "
+        "Step 10 counts it from the BAM when enough reads span it."
+    )
+
     md.extend([
         "",
         "## 3. Known Short-Read Pharmacogenomics Limitations",
         cyp2d6_limitation,
-        "- ***UGT1A1\\*28* TA-repeat:** Promoter `(TA)7` repeat expansion is not reliably called in standard short-read SNV VCFs.",
+        ugt_limitation,
         hla_limitation,
         "- ***G6PD*:** Only six common deficiency alleles (A- c.202A/c.680T/c.968C, Mediterranean, Canton, Kaiping) are tested; "
         "over 200 rare variants exist. Heterozygous females have variable activity, so a quantitative enzyme activity test is the deciding test.",

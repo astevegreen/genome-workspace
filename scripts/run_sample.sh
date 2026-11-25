@@ -103,6 +103,14 @@ else
   echo "[${LABEL}] Already normalized: ${VAR_NORM} ($(bcftools index -n "${VAR_NORM}") records)"
 fi
 
+# Step 3 runs before anything reads the BAM results: a failure blocks Step 10, keeps earlier BAM results off the
+# Step 7/8/11 reports, and makes this script exit 1 at the end (the VCF-only steps still run).
+IDENTITY_OK=1
+echo "[${LABEL}] Running Step 3 (sample identity QC: BAM vs VCF genotypes, genetic sex vs samples.tsv)..."
+if ! .venv-wsl/bin/python scripts/03_sample_identity_qc.py --sample "${LABEL}"; then
+  IDENTITY_OK=0
+fi
+
 echo "[${LABEL}] Running Step 4 (ClinVar + GenCC + ACMG SF v3.3 screening)..."
 .venv-wsl/bin/python scripts/04_carrier_screen.py --sample "${LABEL}"
 
@@ -120,13 +128,11 @@ else
 fi
 
 ALIGN_FOUND="$(find "data/alignments/${LABEL}" -maxdepth 1 \( -type f -o -type l \) \( -name '*.bam' -o -name '*.cram' \) 2>/dev/null | head -n 1 || true)"
-if [[ -n "${ALIGN_FOUND}" ]]; then
-  echo "[${LABEL}] Alignment file detected: ${ALIGN_FOUND}"
-  if [[ ! -f "${QC_DIR}/bam.idxstats.tsv" ]]; then
-    echo "[${LABEL}] Running samtools idxstats -> ${QC_DIR}/bam.idxstats.tsv"
-    samtools idxstats "${ALIGN_FOUND}" > "${QC_DIR}/bam.idxstats.tsv"
-  fi
-  echo "[${LABEL}] Running Step 10 (BAM blind-spot callers: ExpansionHunter, SMNCopyNumberCaller, Cyrius, SV/phasing check)..."
+if [[ -n "${ALIGN_FOUND}" && "${IDENTITY_OK}" -eq 0 ]]; then
+  echo "[${LABEL}] SKIPPING Step 10: sample identity QC failed (see results/reports/${LABEL}/sample_identity_qc.md)." >&2
+elif [[ -n "${ALIGN_FOUND}" ]]; then
+  echo "[${LABEL}] Alignment file detected: ${ALIGN_FOUND} (Step 3 wrote ${QC_DIR}/bam.idxstats.tsv)"
+  echo "[${LABEL}] Running Step 10 (BAM blind-spot callers: ExpansionHunter, SMNCopyNumberCaller, Cyrius, T1K, UGT1A1 TA repeat, SV/phasing check)..."
   .venv-wsl/bin/python scripts/10_bam_blind_spots.py --sample "${LABEL}" --threads "${THREADS}"
 else
   echo "[${LABEL}] No BAM/CRAM alignment file found in data/alignments/${LABEL}/ (skipping alignment-based blind-spot callers)."
@@ -137,4 +143,9 @@ echo "[${LABEL}] Running Step 11 (PharmCAT cross-check of the medication card)..
 .venv-wsl/bin/python scripts/11_pharmcat_crosscheck.py --sample "${LABEL}" || echo "[${LABEL}] Step 11 failed; the medication card is unaffected."
 
 echo "============================================================"
+if [[ "${IDENTITY_OK}" -eq 0 ]]; then
+  echo "Pipeline for ${LABEL} FAILED sample identity QC: BAM-based results were not used." >&2
+  echo "Fix the data/alignments/${LABEL}/ link or the sex in config/samples.tsv, then re-run." >&2
+  exit 1
+fi
 echo "Pipeline complete for ${LABEL}!"

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import json
 import os
 import shutil
 import subprocess
@@ -28,10 +27,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.genomics import read_sample_sex
+from lib.identity import bam_results_usable, load_bam_results
 from lib.pharmcat import (
     REF_BLOCK_MIN_DP,
     build_outside_calls,
     compare_card_with_pharmcat,
+    describe_input_at,
     parse_calls_only_tsv,
     parse_phenotype_json,
     render_crosscheck_report,
@@ -86,8 +87,9 @@ def main() -> None:
     male = read_sample_sex(REPO_ROOT / "config" / "samples.tsv", label) == "M"
     stats = write_pharmcat_input(variants, gvcf, positions, input_vcf, min_dp=args.min_ref_dp, male=male)
 
-    bam_json = rep_dir / "bam_blind_spots.json"
-    bam = json.loads(bam_json.read_text(encoding="utf-8")) if bam_json.exists() else None
+    bam = load_bam_results(rep_dir)
+    if not bam_results_usable(rep_dir):
+        print(f"[{label}] Sample identity QC failed: running PharmCAT without the BAM outside calls.")
     outside = build_outside_calls(bam)
     if outside:
         # pharmcat_pipeline copies *.outside.tsv only when its input is a directory, and pairs
@@ -116,7 +118,11 @@ def main() -> None:
     tsv_rows = parse_calls_only_tsv(calls_tsv)
     pheno_json = out_dir / f"{label}.phenotype.json"
     pc_rows = parse_phenotype_json(pheno_json, tsv_rows) if pheno_json.exists() else tsv_rows
-    rows = compare_card_with_pharmcat(card_rows, pc_rows, outside)
+    rows = compare_card_with_pharmcat(
+        card_rows, pc_rows, outside,
+        ugt1a1_ta=(bam or {}).get("ugt1a1_ta_repeat"),
+        ugt1a1_pharmcat_input=describe_input_at(input_vcf),
+    )
     meta = {
         "run_date": datetime.date.today().isoformat(),
         "pharmcat_version": version or positions.name.removeprefix("pharmcat_positions_").removesuffix(".vcf.bgz"),
