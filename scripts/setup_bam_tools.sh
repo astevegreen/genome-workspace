@@ -201,7 +201,14 @@ export MAMBA_ROOT_PREFIX="${TOOLS_DIR}/mamba"
 if [[ ! -x "${MAMBA_BIN}" ]]; then
   mkdir -p "${TOOLS_DIR}/bin"
   curl -fL --retry 3 -o "${TOOLS_DIR}/micromamba.tar.bz2" "https://micro.mamba.pm/api/micromamba/linux-64/latest"
-  tar -xjf "${TOOLS_DIR}/micromamba.tar.bz2" -C "${TOOLS_DIR}" bin/micromamba
+  # Python's tarfile handles .bz2 itself, so the bzip2 binary (absent on minimal WSL) isn't needed
+  python3 - "${TOOLS_DIR}/micromamba.tar.bz2" "${TOOLS_DIR}" <<'PY'
+import sys, tarfile
+with tarfile.open(sys.argv[1], "r:bz2") as tf:
+    member = tf.getmember("bin/micromamba")
+    tf.extract(member, sys.argv[2])
+PY
+  chmod +x "${MAMBA_BIN}"
   rm -f "${TOOLS_DIR}/micromamba.tar.bz2"
 fi
 if [[ ! -e "${T1K_ENV}/bin/run-t1k" ]]; then
