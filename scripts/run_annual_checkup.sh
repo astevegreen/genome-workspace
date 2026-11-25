@@ -5,6 +5,7 @@ set -euo pipefail
 #   1. Ensures references exist (or refreshes ClinVar & GenCC when --refresh-refs is passed)
 #   2. Runs the per-sample pipeline for every sample listed in config/samples.tsv
 #   3. Runs joint couple screening + auto-generates plain_language_summary.md
+#   4. Renders every report .md to PDF (Step 12; per sample inside run_sample.sh, then the couple reports)
 #
 # Usage:
 #   bash scripts/run_annual_checkup.sh                 # Re-run with current local references
@@ -48,6 +49,7 @@ if [[ -n "${MALE_LABEL}" && -n "${FEMALE_LABEL}" ]]; then
   echo "============================================================"
   echo "Step B: Running Joint Couple Screening (${MALE_LABEL} + ${FEMALE_LABEL})..."
   .venv-wsl/bin/python scripts/08_couple_carrier_screen.py --male "${MALE_LABEL}" --female "${FEMALE_LABEL}"
+  .venv-wsl/bin/python scripts/12_render_pdfs.py couple || echo "Step 12 failed for the couple reports; the Markdown reports are unaffected."
 fi
 
 echo "============================================================"

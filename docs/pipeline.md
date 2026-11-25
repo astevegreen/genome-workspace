@@ -21,7 +21,8 @@ What this does automatically:
    - **Step 7 (`07_deep_analysis.py`):** GENCODE v46 coding-exon CNV/SV filtering (reusing Step 4's ClinVar P/LP gene list and preserving full untruncated gene lists for couple matching), strict `FILTER == PASS` + conservative `MinDP`/`MIN_DP >= 10x` gVCF coverage audit, categorized Clinical / CPIC Tier-1 PGx / Common Trait genotyping (phased- and unphased-safe *APOE*; sex-aware X-linked *G6PD* using `sex` from `config/samples.tsv`; *MT-RNR1* aminoglycoside variants with heteroplasmy fraction), and **CPIC Medication Card** (`pgx_medication_card.md`).
    - **Step 9 (`09_polygenic_risk.py`, automatic once PRS references are built):** Gold-standard local Polygenic Risk Scores across 9 curated PGS Catalog GRCh38 traits, empirically calibrated against unrelated 1000 Genomes GRCh38 superpopulations via PLINK 2.0 (`polygenic_risk_report.md`).
    - Automatically checks `data/alignments/<label>/` for uploaded `.bam`/`.cram` files.
-3. **`scripts/08_couple_carrier_screen.py`** — Runs sex-concordance QC, shared recessive SNV/indel and transparent SV+SV overlap checks (across full untruncated exonic SV gene lists), reciprocal partner coverage & Ensembl VEP novel-variant rescue, maternal X-linked/MT screening, AD/AD-AR & ACMG SF v3.3 screening, and **auto-generates `results/reports/couple/plain_language_summary.md`**.
+   - **Step 12 (`12_render_pdfs.py`):** renders every `results/reports/<label>/*.md` to a `.pdf` beside it (see section 6).
+3. **`scripts/08_couple_carrier_screen.py`** — Runs sex-concordance QC, shared recessive SNV/indel and transparent SV+SV overlap checks (across full untruncated exonic SV gene lists), reciprocal partner coverage & Ensembl VEP novel-variant rescue, maternal X-linked/MT screening, AD/AD-AR & ACMG SF v3.3 screening, and **auto-generates `results/reports/couple/plain_language_summary.md`**, then renders the couple reports to PDF (Step 12).
 
 ## 2. Running Individual Steps
 
@@ -79,3 +80,24 @@ Step 11 then runs at the end of `run_sample.sh` (or `.venv-wsl/bin/python script
 - compares PharmCAT gene by gene with `pgx_medication_card.tsv` and writes `results/reports/<label>/pharmcat_crosscheck.{md,tsv}`, with PharmCAT's own HTML/JSON report in `pharmcat/`.
 
 PharmCAT also reports genes the card lacks (for example *NAT2*, *IFNL3*, *RYR1*/*CACNA1S*, *CFTR*, *ABCG2*, *CYP3A4*).
+
+PharmCAT runs from `data/processed/<label>/pharmcat/`, so its own `pharmcat.log` (it always writes the log to the
+working directory) stays there and is replaced on every run. `pharmcat.log` is gitignored in case an older run left
+one at the repo root.
+
+## 6. PDF Copies of the Reports (Step 12)
+
+`run_sample.sh` ends by rendering that sample's reports, and `run_annual_checkup.sh` renders the couple reports after
+Step 8. To re-render by hand:
+
+```bash
+.venv-wsl/bin/python scripts/12_render_pdfs.py            # every directory under results/reports/
+.venv-wsl/bin/python scripts/12_render_pdfs.py partner_a couple # chosen directories only
+```
+
+Each `.md` is converted to print-styled HTML (Python-Markdown with tables; landscape US Letter when the report has a
+table of 7 or more columns, portrait otherwise) and printed with headless Chrome, Edge or Chromium. The browser is
+`$CHROME` if set, else the first of `chromium`, `google-chrome`, `microsoft-edge`, or the Windows Chrome / Edge
+install reached through WSL interop. The HTML and the browser profile live in a temporary folder under `data/tmp/`;
+a PDF replaces the old one only once the browser has written a valid file. Each PDF ends with a "Rendered <date>
+from <label>/<file>.md" line, so a stale copy is easy to spot.
