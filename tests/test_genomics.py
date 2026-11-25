@@ -17,7 +17,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.api_client import CachedAnnotationClient, format_af
 from lib.constants import ACMG_SF_GENES, TARGETED_MARKERS
-from lib.pgx import interpret_cyp2d6_cyrius, interpret_pgx_profile, render_pgx_medication_card
+from lib.pgx import (
+    interpret_cyp2d6_cyrius,
+    interpret_hla_typing,
+    interpret_pgx_profile,
+    normalize_hla_allele,
+    render_pgx_medication_card,
+)
 from lib.genomics import (
     assess_artifact_or_common,
     classify_clnsig,
@@ -404,3 +410,143 @@ def test_cyp2d6_cyrius_interpretation_and_bam_helpers() -> None:
     assert step10.classify_sv_bam_support("DEL", 0.98, 55.0, 4, 2) == "NO_DEPTH_DROP_LIKELY_ARTIFACT_OR_REPEAT"
     assert step10.classify_sv_bam_support("DUP", 1.48, 55.0, 10, 8) == "CONFIRMED_DUP_GAIN"
     assert step10.classify_sv_bam_support("DUP", 1.01, 55.0, 5, 3) == "NO_DEPTH_GAIN_LIKELY_ARTIFACT_OR_REPEAT"
+
+
+def _g6pd_mt_markers(overrides: dict[str, tuple[str, str, float | None]]) -> list[dict]:
+    rsids = [
+        "rs1050828", "rs1050829", "rs137852328", "rs76723693", "rs5030868", "rs72554665", "rs72554664",
+        "rs267606617", "rs267606619", "rs267606618",
+    ]
+    rows = []
+    for rs in rsids:
+        status, gt, ab = overrides.get(rs, ("REF_CONFIRMED", "0/0 (REF)", None))
+        rows.append({"rsid": rs, "status": status, "gt": gt, "ab": ab})
+    return rows
+
+
+def test_g6pd_mt_rnr1_interpretation_is_sex_and_ploidy_aware() -> None:
+    a_minus = {
+        "rs1050828": ("VARIANT_PRESENT", "1", None),   # haploid male X call
+        "rs1050829": ("VARIANT_PRESENT", "1", None),
+    }
+    male = {e["gene"]: e for e in interpret_pgx_profile(_g6pd_mt_markers(a_minus), sex="M")}
+    assert male["G6PD"]["phenotype"] == "Deficient"
+    assert male["G6PD"]["tier"] == "ACTIONABLE"
+    assert male["G6PD"]["diplotype"].startswith("A- (c.202A)")
+    assert male["MT-RNR1"]["tier"] == "NORMAL"
+
+    het = {"rs1050828": ("VARIANT_PRESENT", "0/1", 0.5), "rs1050829": ("VARIANT_PRESENT", "0/1", 0.5)}
+    female = {e["gene"]: e for e in interpret_pgx_profile(_g6pd_mt_markers(het), sex="F")}
+    assert female["G6PD"]["phenotype"].startswith("Variable")
+    assert female["G6PD"]["diplotype"] == "A- (c.202A)/B (reference)"
+
+    # c.376A>G alone (G6PD A) is non-deficient
+    g6pd_a = {"rs1050829": ("VARIANT_PRESENT", "1/1", 1.0)}
+    a_only = {e["gene"]: e for e in interpret_pgx_profile(_g6pd_mt_markers(g6pd_a), sex="F")}
+    assert a_only["G6PD"]["phenotype"] == "Normal"
+    assert a_only["G6PD"]["diplotype"] == "A (c.376G)/A (c.376G)"
+
+    mt = {"rs267606617": ("VARIANT_PRESENT", "0/1", 0.35)}
+    mt_res = {e["gene"]: e for e in interpret_pgx_profile(_g6pd_mt_markers(mt), sex="F")}
+    assert mt_res["MT-RNR1"]["tier"] == "ACTIONABLE"
+    assert "m.1555A>G (heteroplasmic, AF=0.35)" in mt_res["MT-RNR1"]["diplotype"]
+
+    # Missing coverage -> INCOMPLETE; markers absent entirely (old TSV) -> no entry
+    lowcov = {"rs5030868": ("NOT_COVERED", "./.", None)}
+    inc = {e["gene"]: e for e in interpret_pgx_profile(_g6pd_mt_markers(lowcov), sex="M")}
+    assert inc["G6PD"]["tier"] == "INCOMPLETE"
+    assert "G6PD" not in {e["gene"] for e in interpret_pgx_profile([], sex="M")}
+
+    # Low-depth REF: hemizygous male X at >= 6x is callable; female at 6x is not
+    shallow = _g6pd_mt_markers({})
+    for row in shallow:
+        if row["rsid"] == "rs1050828":
+            row.update(status="REF_LOW_DP", dp=6)
+    male_ok = {e["gene"]: e for e in interpret_pgx_profile(shallow, sex="M")}
+    assert male_ok["G6PD"]["phenotype"] == "Normal"
+    female_shallow = {e["gene"]: e for e in interpret_pgx_profile(shallow, sex="F")}
+    assert female_shallow["G6PD"]["tier"] == "INCOMPLETE"
+
+
+def test_hla_t1k_parsing_and_cpic_risk_alleles(tmp_path: Path) -> None:
+    assert normalize_hla_allele("HLA-B*57:01:01") == "HLA-B*57:01"
+    assert normalize_hla_allele("B*58:01") == "HLA-B*58:01"
+    assert normalize_hla_allele("HLA-A*24:09N") == "HLA-A*24:09"
+    assert normalize_hla_allele("HLA-A*02") is None
+    assert normalize_hla_allele(".") is None
+
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_hla_mod")
+    tsv = tmp_path / "s_genotype.tsv"
+    tsv.write_text(
+        "HLA-A\t2\tHLA-A*02:01\t40.1\t60\tHLA-A*31:01\t35.2\t55\t.\n"
+        "HLA-B\t2\tHLA-B*57:01\t30.0\t48\tHLA-B*07:02\t28.0\t0\t.\n"
+        "HLA-C\t1\tHLA-C*07:02\t50.0\t60\t.\t0\t-1\t.\n",
+        encoding="utf-8",
+    )
+    parsed = step10.parse_t1k_genotype(tsv)
+    assert parsed["genotypes"]["HLA-A"] == ["HLA-A*02:01", "HLA-A*31:01"]
+    assert parsed["genotypes"]["HLA-B"] == ["HLA-B*57:01"]  # quality 0 allele dropped
+    assert parsed["genotypes"]["HLA-C"] == ["HLA-C*07:02"]
+
+    entries = {e["gene"]: e for e in interpret_hla_typing({"status": "OK", **parsed})}
+    assert entries["HLA-A"]["tier"] == "ACTIONABLE"
+    assert "A*31:01" in entries["HLA-A"]["phenotype"]
+    assert entries["HLA-B"]["tier"] == "ACTIONABLE"
+    assert "Abacavir" in entries["HLA-B"]["drugs"]
+
+    negative = interpret_hla_typing({"status": "OK", "genotypes": {"HLA-A": ["A*01:01", "A*02:01"], "HLA-B": []}})
+    by_gene = {e["gene"]: e for e in negative}
+    assert by_gene["HLA-A"]["tier"] == "NORMAL"
+    assert by_gene["HLA-B"]["tier"] == "INCOMPLETE"
+    assert interpret_hla_typing({"status": "TOOL_NOT_FOUND"}) == []
+
+    card = render_pgx_medication_card("t", {"run_date": "2026-11-24"}, list(entries.values()))
+    assert "BAM-typed via T1K" in card
+
+
+def test_hla_tied_candidates_and_low_quality(tmp_path: Path) -> None:
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_hla_tie_mod")
+    tsv = tmp_path / "s_genotype.tsv"
+    tsv.write_text(
+        "HLA-A\t2\tHLA-A*01:01\t30.0\t20\tHLA-A*11:99\t5.0\t1\t.\n"
+        "HLA-B\t2\tHLA-B*08:01\t20.0\t12\tHLA-B*57:03,HLA-B*57:01\t13.6\t8\t.\n",
+        encoding="utf-8",
+    )
+    parsed = step10.parse_t1k_genotype(tsv)
+    assert parsed["qualities"]["HLA-A"] == [20.0, 1.0]
+    entries = {e["gene"]: e for e in interpret_hla_typing({"status": "OK", **parsed})}
+
+    # A risk allele inside a tie must not read as negative
+    assert entries["HLA-B"]["tier"] == "ACTIONABLE"
+    assert "possible B*57:01 (tied call)" in entries["HLA-B"]["phenotype"]
+    assert "B*57:03 (tie: B*57:01)" in entries["HLA-B"]["diplotype"]
+
+    # A quality-1 allele is flagged, not silently trusted
+    assert entries["HLA-A"]["tier"] == "NORMAL"
+    assert entries["HLA-A"]["diplotype"].startswith("A*01:01/A*11:99?")
+    assert "A*11:99 is a low-confidence call" in entries["HLA-A"]["guidance"]
+    assert "standard prescribing" not in entries["HLA-A"]["guidance"]
+
+    # Results saved before qualities existed still interpret
+    old = interpret_hla_typing({"status": "OK", "genotypes": parsed["genotypes"]})
+    assert {e["gene"]: e for e in old}["HLA-B"]["tier"] == "ACTIONABLE"
+
+
+def test_t1k_space_free_alignment_links(tmp_path: Path) -> None:
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_space_mod")
+    src_dir = tmp_path / "My Data"
+    src_dir.mkdir()
+    bam = src_dir / "x.bam"
+    bam.write_bytes(b"")
+    (src_dir / "x.bam.bai").write_bytes(b"")
+    out = tmp_path / "t1k"
+    out.mkdir()
+    link = step10._space_free_alignment(bam, out)
+    assert " " not in str(link.relative_to(tmp_path))
+    assert link.resolve() == bam.resolve()
+    assert Path(str(link) + ".bai").resolve() == (src_dir / "x.bam.bai").resolve()
+    # Re-running replaces the links instead of failing
+    assert step10._space_free_alignment(bam, out) == link
+    plain = tmp_path / "plain.bam"
+    plain.write_bytes(b"")
+    assert step10._space_free_alignment(plain, out) == plain.resolve()

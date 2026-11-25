@@ -122,6 +122,18 @@ TARGETED_MARKERS: list[tuple[str, str, str, str, int, str, str, str]] = [
     ("pgx", "NUDT15", "rs116855232", "13", 48045719, "C", "T", "NUDT15*3 (thiopurine toxicity)"),
     ("pgx", "BCHE", "rs1803274", "3", 165773492, "C", "T", "BCHE K-variant (succinylcholine/mivacurium)"),
     ("pgx", "BCHE", "rs1799807", "3", 165830741, "T", "C", "BCHE A-variant (succinylcholine apnea risk)"),
+    # G6PD (X-linked, minus strand: forward alleles are the complement of c. notation)
+    ("pgx", "G6PD", "rs1050828", "X", 154536002, "C", "T", "G6PD c.202G>A (A- deficient allele on the c.376A>G backbone)"),
+    ("pgx", "G6PD", "rs1050829", "X", 154535277, "T", "C", "G6PD c.376A>G (G6PD A: non-deficient alone; A- backbone)"),
+    ("pgx", "G6PD", "rs137852328", "X", 154534125, "C", "A", "G6PD c.680G>T (A- deficient allele on the c.376A>G backbone)"),
+    ("pgx", "G6PD", "rs76723693", "X", 154533025, "A", "G", "G6PD c.968T>C (A- Betica/Santamaria deficient allele)"),
+    ("pgx", "G6PD", "rs5030868", "X", 154534419, "G", "A", "G6PD Mediterranean c.563C>T (deficient)"),
+    ("pgx", "G6PD", "rs72554665", "X", 154532269, "C", "A", "G6PD Canton c.1376G>T (deficient)"),
+    ("pgx", "G6PD", "rs72554664", "X", 154532257, "C", "T", "G6PD Kaiping c.1388G>A (deficient)"),
+    # MT-RNR1 (mitochondrial 12S rRNA; rCRS = GRCh38 MT)
+    ("pgx", "MT-RNR1", "rs267606617", "MT", 1555, "A", "G", "MT-RNR1 m.1555A>G (aminoglycoside-induced hearing loss)"),
+    ("pgx", "MT-RNR1", "rs267606619", "MT", 1494, "C", "T", "MT-RNR1 m.1494C>T (aminoglycoside-induced hearing loss)"),
+    ("pgx", "MT-RNR1", "rs267606618", "MT", 1095, "T", "C", "MT-RNR1 m.1095T>C (aminoglycoside-induced hearing loss)"),
     # --- Common / Non-Actionable Traits (Informational Only) ---
     ("common_trait", "MTHFR", "rs1801133", "1", 11796321, "G", "A", "MTHFR C677T (common folate variant; ACMG considers non-actionable alone)"),
     ("common_trait", "MTHFR", "rs1801131", "1", 11794419, "T", "G", "MTHFR A1298C (common folate variant; ACMG considers non-actionable alone)"),
