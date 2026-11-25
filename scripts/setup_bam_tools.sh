@@ -11,6 +11,8 @@ set -euo pipefail
 #
 # Installs into ~/.local/opt/wgs_tools and creates wrappers in ~/.local/bin.
 
+# Resolve the repo root before the cd below makes a relative BASH_SOURCE path dangle.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS_DIR="${WGS_TOOLS_DIR:-${HOME}/.local/opt/wgs_tools}"
 BIN_DIR="${HOME}/.local/bin"
 export PATH="${BIN_DIR}:${PATH}"
@@ -191,7 +193,6 @@ chmod +x "${BIN_DIR}/star_caller.py"
 
 # 5. T1K (HLA typing) via micromamba + Bioconda
 echo "[5/5] Installing T1K and building the IPD-IMGT/HLA index..."
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAMBA_BIN="${TOOLS_DIR}/bin/micromamba"
 T1K_ENV="${TOOLS_DIR}/t1k-env"
 T1K_IDX="${TOOLS_DIR}/t1k_hlaidx"
