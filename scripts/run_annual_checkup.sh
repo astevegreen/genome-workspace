@@ -39,7 +39,8 @@ FEMALE_LABEL=""
 LABELS=()
 while IFS=$'\t' read -r label sample_id sex _rest; do
   [[ -z "${label}" || "${label}" == "label" ]] && continue
-  bash scripts/run_sample.sh "${label}"
+  # </dev/null: a tool inside run_sample.sh otherwise reads the rest of samples.tsv from stdin and ends this loop
+  bash scripts/run_sample.sh "${label}" < /dev/null
   LABELS+=("${label}")
   if [[ "${sex}" == "M" && -z "${MALE_LABEL}" ]]; then
     MALE_LABEL="${label}"
