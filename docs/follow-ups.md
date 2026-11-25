@@ -33,3 +33,8 @@ Build items agreed on 25 Nov 2026, in order. Tick each off with the commit that 
    UGT1A1 test.
 6. [ ] **Storage and backup (owner).** Convert the BAMs to CRAM (about half the size) and keep a second copy off the
    external D: drive.
+7. [ ] **Stop tracking `pharmcat.log`.** PharmCAT appends to it at the repo root on every Step 11 run (sample labels
+   and local paths) and it is tracked in this public repo: `git rm --cached pharmcat.log`, add it to `.gitignore`,
+   or have Step 11 run PharmCAT with its log inside `data/processed/<label>/pharmcat/`.
+8. [ ] **Re-render the PDFs.** The `.pdf` copies in `results/reports/` date from 22 Nov and are made outside the
+   pipeline, so they lack Steps 3 and 11 and the UGT1A1 row.
