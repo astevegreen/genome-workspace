@@ -142,6 +142,9 @@ fi
 echo "[${LABEL}] Running Step 11 (PharmCAT cross-check of the medication card)..."
 .venv-wsl/bin/python scripts/11_pharmcat_crosscheck.py --sample "${LABEL}" || echo "[${LABEL}] Step 11 failed; the medication card is unaffected."
 
+echo "[${LABEL}] Running Step 12 (render every report .md to PDF)..."
+.venv-wsl/bin/python scripts/12_render_pdfs.py "${LABEL}" || echo "[${LABEL}] Step 12 failed; the Markdown reports are unaffected."
+
 echo "============================================================"
 if [[ "${IDENTITY_OK}" -eq 0 ]]; then
   echo "Pipeline for ${LABEL} FAILED sample identity QC: BAM-based results were not used." >&2

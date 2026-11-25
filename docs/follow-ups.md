@@ -33,8 +33,15 @@ Build items agreed on 25 Nov 2026, in order. Tick each off with the commit that 
    UGT1A1 test.
 6. [ ] **Storage and backup (owner).** Convert the BAMs to CRAM (about half the size) and keep a second copy off the
    external D: drive.
-7. [ ] **Stop tracking `pharmcat.log`.** PharmCAT appends to it at the repo root on every Step 11 run (sample labels
+7. [x] **Stop tracking `pharmcat.log`.** PharmCAT appends to it at the repo root on every Step 11 run (sample labels
    and local paths) and it is tracked in this public repo: `git rm --cached pharmcat.log`, add it to `.gitignore`,
    or have Step 11 run PharmCAT with its log inside `data/processed/<label>/pharmcat/`.
-8. [ ] **Re-render the PDFs.** The `.pdf` copies in `results/reports/` date from 22 Nov and are made outside the
+   Done all three ways. PharmCAT's bundled `logback.xml` writes `pharmcat.log` to a relative path (the working
+   directory), so Step 11 now runs it with `cwd` set to `data/processed/<label>/pharmcat/`. The file is untracked
+   and gitignored. It held only sample labels and local paths, so history was not rewritten.
+8. [x] **Re-render the PDFs.** The `.pdf` copies in `results/reports/` date from 22 Nov and are made outside the
    pipeline, so they lack Steps 3 and 11 and the UGT1A1 row.
+   The 22 Nov copies came from a one-off scratch script (a hand-written Markdown-to-HTML converter, then Windows
+   headless Chrome `--print-to-pdf`) for six reports. Step 12 (`scripts/12_render_pdfs.py`) now renders every report
+   `.md` the same way at the end of `run_sample.sh` and for the couple in `run_annual_checkup.sh`. Re-rendered on
+   25 Nov for both samples and the couple (16 PDFs).
