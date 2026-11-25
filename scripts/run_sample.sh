@@ -132,5 +132,9 @@ else
   echo "[${LABEL}] No BAM/CRAM alignment file found in data/alignments/${LABEL}/ (skipping alignment-based blind-spot callers)."
 fi
 
+# Step 11 runs after Step 10 so PharmCAT gets the Cyrius CYP2D6 and T1K HLA outside calls; it skips itself without PharmCAT
+echo "[${LABEL}] Running Step 11 (PharmCAT cross-check of the medication card)..."
+.venv-wsl/bin/python scripts/11_pharmcat_crosscheck.py --sample "${LABEL}" || echo "[${LABEL}] Step 11 failed; the medication card is unaffected."
+
 echo "============================================================"
 echo "Pipeline complete for ${LABEL}!"

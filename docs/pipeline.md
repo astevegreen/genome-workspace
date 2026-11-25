@@ -60,5 +60,20 @@ Having BAM/CRAM alignments locally will unlock:
 1. **Repeat Expansions (*FMR1* Fragile X, *HTT*, *C9orf72*, *DMPK*, *FXN*):** `ExpansionHunter`
 2. **Spinal Muscular Atrophy (*SMN1*/*SMN2* exon 7 & 2+0 carriers):** `SMNCopyNumberCaller`
 3. **Full *CYP2D6* Star-Allele & CNV/Hybrid Calling:** `Cyrius` or `Aldy`
-4. **HLA Typing (*HLA-A*/*-B* CPIC hypersensitivity alleles `B*57:01`, `B*58:01`, `B*15:02`, `A*31:01`):** `T1K` (`--preset hla-wgs`), installed with its IPD-IMGT/HLA index by `bash scripts/setup_bam_tools.sh`
+4. **HLA Typing (*HLA-A*/*-B* CPIC hypersensitivity alleles `B*57:01`, `B*58:01`, `B*15:02`, `A*31:01`):** `T1K` (`--preset hla-wgs`), installed with its IPD-IMGT/HLA index by `bash scripts/setup_bam_tools.sh`. The same typing also gives celiac HLA-DQ2/DQ8 and HLA-B27 associations (Step 10 report, section 7).
 5. **Visual Read-Level Verification & Cis/Trans Phasing:** `samtools tview` / IGV for any shared exonic SV calls (Section 2b of the couple report) or potential compound heterozygotes.
+
+## 5. PharmCAT Cross-Check of the Medication Card (Step 11)
+
+One-time install (Java, bcftools 1.24 and PharmCAT 3.4.0 under `~/.local/opt/wgs_tools`):
+
+```bash
+bash scripts/setup_pharmcat.sh
+```
+
+Step 11 then runs at the end of `run_sample.sh` (or `.venv-wsl/bin/python scripts/11_pharmcat_crosscheck.py --sample <label>`). It:
+- builds a PharmCAT input from the sample's variants plus explicit 0/0 calls where the gVCF has a PASS reference block of at least 10x (6x on male non-PAR chrX); every other absent position stays a no-call, never assumed reference;
+- passes Step 10's Cyrius *CYP2D6* and untied T1K *HLA-A*/*HLA-B* calls as outside calls;
+- compares PharmCAT gene by gene with `pgx_medication_card.tsv` and writes `results/reports/<label>/pharmcat_crosscheck.{md,tsv}`, with PharmCAT's own HTML/JSON report in `pharmcat/`.
+
+PharmCAT also reports genes the card lacks (for example *NAT2*, *IFNL3*, *RYR1*/*CACNA1S*, *CFTR*, *ABCG2*, *CYP3A4*).

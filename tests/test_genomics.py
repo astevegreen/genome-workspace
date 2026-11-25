@@ -18,6 +18,16 @@ if str(SCRIPT_DIR) not in sys.path:
 from lib.api_client import CachedAnnotationClient, format_af
 from lib.constants import ACMG_SF_GENES, TARGETED_MARKERS
 from lib.hla_traits import interpret_hla_associations
+from lib.pharmcat import (
+    build_outside_calls,
+    compare_card_with_pharmcat,
+    confirmed_reference_positions,
+    cyrius_to_outside,
+    hla_to_outside,
+    parse_calls_only_tsv,
+    render_crosscheck_report,
+    write_pharmcat_input,
+)
 from lib.pgx import (
     interpret_cyp2d6_cyrius,
     interpret_hla_typing,
@@ -608,6 +618,120 @@ def test_bam_report_shows_hla_associations(tmp_path: Path) -> None:
     assert "Carries DQ2.5" in md
     assert "HLA-B27 positive" in md
     assert "needs T1K HLA typing" in step10.render_bam_report("t", tmp_path / "t.bam", {}, {}, {}, [], [], None)
+
+
+def _write_vcf(path: Path, body: list[str], contigs: tuple[str, ...] = ("1",), info_end: bool = True) -> Path:
+    head = ["##fileformat=VCFv4.2", '##FILTER=<ID=PASS,Description="All filters passed">',
+            '##FILTER=<ID=LowQual,Description="Low quality">']
+    if info_end:
+        head += ['##INFO=<ID=END,Number=1,Type=Integer,Description="End">',
+                 '##INFO=<ID=MinDP,Number=1,Type=Integer,Description="Min DP">']
+    head += ['##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+             '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">']
+    head += [f"##contig=<ID={c},length=100000>" for c in contigs]
+    head.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1")
+    raw = path.with_suffix("")
+    raw.write_text("\n".join(head + body) + "\n", encoding="utf-8")
+    pysam.tabix_compress(str(raw), str(path), force=True)
+    pysam.tabix_index(str(path), preset="vcf", force=True)
+    return path
+
+
+def test_pharmcat_input_fills_only_well_covered_reference(tmp_path: Path) -> None:
+    gvcf = _write_vcf(tmp_path / "s.genome.vcf.gz", [
+        "1\t100\t.\tA\t.\t.\tPASS\tEND=149;MinDP=20\tGT:DP\t0/0:20",
+        "1\t150\t.\tC\tT\t99\tPASS\t.\tGT:DP\t0/1:25",
+        "1\t151\t.\tG\t.\t.\tPASS\tEND=200;MinDP=18\tGT:DP\t0/0:18",
+        "1\t201\t.\tA\t.\t.\tPASS\tEND=260;MinDP=30\tGT:DP\t0/0:30",
+        "1\t300\t.\tT\t.\t.\tPASS\tEND=400;MinDP=5\tGT:DP\t0/0:5",
+        "1\t401\t.\tG\t.\t.\tLowQual\tEND=450;MinDP=40\tGT:DP\t0/0:40",
+    ])
+    variants = _write_vcf(tmp_path / "s.variants.vcf.gz", ["1\t150\t.\tC\tT\t99\tPASS\t.\tGT:DP\t0/1:25"])
+    positions = _write_vcf(tmp_path / "positions.vcf.gz", [
+        "chr1\t120\trsA\tG\tA\t.\tPASS\t.\tGT\t./.",       # inside a 20x 0/0 block -> 0/0
+        "chr1\t150\trsB\tC\tT\t.\tPASS\t.\tGT\t./.",       # sample variant -> keep the real call
+        "chr1\t198\trsC\tGATTA\tG\t.\tPASS\t.\tGT\t./.",   # deletion spanning two adjacent blocks -> 0/0
+        "chr1\t258\trsG\tAAAAAA\tA\t.\tPASS\t.\tGT\t./.",  # REF runs past the block end -> no-call
+        "chr1\t350\trsD\tT\tC\t.\tPASS\t.\tGT\t./.",       # 5x block -> stays a no-call
+        "chr1\t420\trsE\tG\tA\t.\tPASS\t.\tGT\t./.",       # LowQual block -> stays a no-call
+        "chr1\t500\trsF\tA\tG\t.\tPASS\t.\tGT\t./.",       # no gVCF record -> stays a no-call
+    ], contigs=("chr1",), info_end=False)
+
+    confirmed = {pos for _, pos, _, _ in confirmed_reference_positions(gvcf, positions)}
+    assert confirmed == {120, 198}
+
+    out = tmp_path / "s.vcf.bgz"
+    stats = write_pharmcat_input(variants, gvcf, positions, out)
+    assert stats == {"variant_records": 1, "reference_fills": 2, "positions_confirmed_ref": 2}
+    with pysam.VariantFile(str(out)) as vf:
+        calls = {(r.pos, r.ref): r.samples[0]["GT"] for r in vf}
+    assert calls == {(120, "G"): (0, 0), (150, "C"): (0, 1), (198, "GATTA"): (0, 0)}
+
+    # Male non-PAR chrX uses the 6x hemizygous floor; female chrX keeps 10x
+    xgvcf = _write_vcf(tmp_path / "x.genome.vcf.gz", ["X\t5000000\t.\tA\t.\t.\tPASS\tEND=5000100;MinDP=7\tGT:DP\t0:7"], contigs=("X",))
+    xpos = _write_vcf(tmp_path / "xpos.vcf.gz", ["chrX\t5000050\trsX\tC\tT\t.\tPASS\t.\tGT\t./."], contigs=("chrX",), info_end=False)
+    assert [p for _, p, _, _ in confirmed_reference_positions(xgvcf, xpos, male=True)] == [5000050]
+    assert confirmed_reference_positions(xgvcf, xpos, male=False) == []
+
+
+def test_pharmcat_outside_calls() -> None:
+    assert cyrius_to_outside("*1/*36+*10") == "*1/[*36 + *10]"
+    assert cyrius_to_outside("*1x3/*2") == "*1≥3/*2"
+    assert cyrius_to_outside("*2x2/*4") == "*2x2/*4"
+    assert cyrius_to_outside("None") is None
+    assert cyrius_to_outside("*1/*2;*1/*3") is None
+
+    hla = _hla({"HLA-A": ["A*03:01", "A*24:02"], "HLA-B": ["B*44:02,B*44:27", "B*13:02"]})
+    calls = build_outside_calls({"cyrius_cyp2d6": {"status": "OK", "genotype": "*1/*4"}, "hla_t1k": hla})
+    assert calls == {"CYP2D6": "*1/*4", "HLA-A": "*03:01/*24:02"}  # tied HLA-B is not passed
+    assert hla_to_outside(_hla({"HLA-B": ["B*44:02"]}), "HLA-B") == "*44:02/*44:02"
+
+
+def test_pharmcat_comparison(tmp_path: Path) -> None:
+    tsv = tmp_path / "s.report.tsv"
+    cols = ["Gene", "Source Diplotype", "Phenotype", "Activity Score", "Outside Call", "Missing positions"]
+    lines = ["# PharmCAT calls", "\t".join(cols)] + ["\t".join(r) for r in [
+        ["CYP2C19", "*1/*17", "Rapid Metabolizer", "", "no", ""],
+        ["CYP2C9", "*1/*2", "Intermediate Metabolizer", "1.5", "no", ""],
+        ["SLCO1B1", "*1/*1", "Normal Function", "", "no", "rs1"],
+        ["TPMT", "*1/*3A OR *3B/*3C", "", "", "no", ""],
+        ["VKORC1", "rs9923231 reference (C)/rs9923231 variant (T)", "", "", "no", ""],
+        ["CYP4F2", "*1/*3", "", "", "no", ""],
+        ["NAT2", "*4/*5", "Intermediate Acetylator", "", "no", ""],
+        ["UGT1A1", "*1/*28", "Intermediate Metabolizer", "", "no", ""],
+        ["CYP2D6", "*1/*4", "Intermediate Metabolizer", "1.0", "yes", ""],
+    ]]
+    tsv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    pc = parse_calls_only_tsv(tsv)
+    assert set(pc) >= {"CYP2C19", "NAT2"} and pc["CYP2C9"]["Activity Score"] == "1.5"
+
+    card = [
+        {"gene": "CYP2C19", "diplotype": "*1/*17", "phenotype": "Rapid Metabolizer (RM)", "tier": "MODERATE"},
+        {"gene": "CYP2C9", "diplotype": "*1/*1", "phenotype": "Normal Metabolizer (AS=2.0)", "tier": "NORMAL"},
+        {"gene": "SLCO1B1", "diplotype": "*1/*5", "phenotype": "Normal Function", "tier": "NORMAL"},
+        {"gene": "TPMT", "diplotype": "*1/*1", "phenotype": "Normal Metabolizer (NM)", "tier": "NORMAL"},
+        {"gene": "VKORC1", "diplotype": "G/A (-1639 C/T fwd)", "phenotype": "Intermediate Warfarin Sensitivity", "tier": "MODERATE"},
+        {"gene": "CYP4F2", "diplotype": "*1/*1", "phenotype": "Normal", "tier": "NORMAL"},
+        {"gene": "UGT1A1", "diplotype": "No *6 (*28 unassessed)", "phenotype": "Partial — *6 Negative", "tier": "PARTIAL"},
+        {"gene": "BCHE", "diplotype": "Normal", "phenotype": "Normal Activity", "tier": "NORMAL"},
+        {"gene": "CYP2D6", "diplotype": "*1/*4 (BAM Cyrius)", "phenotype": "Intermediate Metabolizer", "tier": "ACTIONABLE"},
+    ]
+    rows = {r["gene"]: r for r in compare_card_with_pharmcat(card, pc, {"CYP2D6": "*1/*4"})}
+    assert rows["CYP2C19"]["status"] == "AGREE"
+    assert rows["CYP2C9"]["status"] == "DISAGREE"
+    assert rows["SLCO1B1"]["status"] == "DIPLOTYPE_DIFFERS"
+    assert rows["TPMT"]["status"] == "PHARMCAT_NO_CALL"
+    assert "more than one possible diplotype" in rows["TPMT"]["note"]
+    assert rows["VKORC1"]["status"] == "AGREE"
+    assert rows["CYP4F2"]["status"] == "DISAGREE"
+    assert rows["UGT1A1"]["status"] == "CARD_INCOMPLETE"
+    assert rows["NAT2"]["status"] == "PHARMCAT_ONLY"
+    assert rows["BCHE"]["status"] == "CARD_ONLY"
+    assert rows["CYP2D6"]["status"] == "AGREE" and "phenotype translation only" in rows["CYP2D6"]["note"]
+
+    md = render_crosscheck_report("t", list(rows.values()), {"run_date": "2026-11-25", "variant_records": 3, "reference_fills": 9})
+    assert md.index("**CYP2C9**") < md.index("**CYP2C19**")  # disagreements listed first
+    assert "1 defining position(s) had no call" in md
 
 
 def test_t1k_space_free_alignment_links(tmp_path: Path) -> None:
