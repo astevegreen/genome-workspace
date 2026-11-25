@@ -8,6 +8,7 @@ Runs specialized short-read alignment callers on data/alignments/<label>/*.{bam,
   4. BAM Read-Level Verification of Exonic SVs (inside vs. flanking depth ratio, MAPQ, split/discordant reads)
   5. BAM Read-Backed Phasing (cis vs. trans via shared reads / read pairs) for candidate compound hets
   6. T1K: HLA class I/II typing (two-field) for CPIC drug-hypersensitivity alleles
+  7. HLA disease associations from the same typing: celiac (HLA-DQ2/DQ8) and HLA-B27
 
 Also upgrades results/reports/<label>/pgx_medication_card.{md,tsv} with Cyrius CYP2D6 and T1K HLA calls.
 """
@@ -33,6 +34,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.genomics import get_reference_metadata, normalize_gt_unphased, read_sample_sex
+from lib.hla_traits import interpret_hla_associations
 from lib.pgx import (
     HLA_PGX_GENES,
     interpret_cyp2d6_cyrius,
@@ -970,6 +972,26 @@ def render_bam_report(
     else:
         md.append(f"_Unavailable: {hla_res.get('status')} ({hla_res.get('error', '')})_")
 
+    md.extend(["", "## 7. HLA Disease Associations (Celiac HLA-DQ2/DQ8, HLA-B27)", ""])
+    associations = interpret_hla_associations(hla_res)
+    if associations:
+        md.extend([
+            "| Trait | Typed alleles | Result | What it means | Next step |",
+            "|---|---|---|---|---|",
+        ])
+        for a in associations:
+            md.append(
+                f"| **{a['trait']}** | `{a['genotype']}` | **[{a['tier']}] {a['result']}** | {a['meaning']} | {a['next_step']} |"
+            )
+        md.extend([
+            "",
+            "_Risk associations, not diagnoses: both are most informative when absent. "
+            "DQA1 and DQB1 are not phased; a DQ2/DQ8 molecule formed in trans carries the same risk. "
+            "Confirm with clinical HLA typing before relying on a result._",
+        ])
+    else:
+        md.append("_Unavailable: needs T1K HLA typing (section 6)._")
+
     return "\n".join(md) + "\n"
 
 
@@ -1048,6 +1070,7 @@ def main() -> None:
         "smn": smn_res,
         "cyrius_cyp2d6": cyrius_res,
         "hla_t1k": hla_res,
+        "hla_associations": interpret_hla_associations(hla_res),
         "sv_verification": sv_rows,
         "phasing_checks": phasing_rows,
     }
@@ -1058,6 +1081,8 @@ def main() -> None:
         pd.DataFrame(eh_res["loci"]).to_csv(rep_dir / "bam_repeat_expansions.tsv", sep="\t", index=False)
     if sv_rows:
         pd.DataFrame(sv_rows).to_csv(rep_dir / "bam_sv_verification.tsv", sep="\t", index=False)
+    if payload["hla_associations"]:
+        pd.DataFrame(payload["hla_associations"]).to_csv(rep_dir / "hla_disease_associations.tsv", sep="\t", index=False)
 
     report_md = render_bam_report(
         sample_label, bam_path, eh_res, smn_res, cyrius_res, sv_rows, phasing_rows, hla_res

@@ -420,6 +420,12 @@ def render_plain_language_summary(
                 return f"Cyrius no-call ({cn_txt}; confirm exact CN/hybrids clinically)"
             return f"`{gt}` ({c['filter']}) — **{c['cpic_phenotype']}**"
 
+        def _fmt_hla_trait(b: dict[str, Any] | None, trait_prefix: str) -> str:
+            for a in (b or {}).get("hla_associations") or []:
+                if str(a.get("trait", "")).startswith(trait_prefix):
+                    return f"**{a['result']}** ({a['tier']})"
+            return "Not run"
+
         md.extend([
             "The following former VCF blind spots have now been directly screened using the raw 30x WGS BAM alignments (research-grade; confirm clinically before reproductive or prescribing decisions):",
             "",
@@ -429,6 +435,11 @@ def render_plain_language_summary(
             f"| **Other Repeat Expansions (31 Loci)** | {_fmt_repeats(male_bam)} | {_fmt_repeats(fem_bam)} |",
             f"| **SMA (*SMN1*/*SMN2* Exon 7 & 2+0)** | {_fmt_smn(male_bam)} | {_fmt_smn(fem_bam)} |",
             f"| ***CYP2D6* Full Star Alleles / CNVs** | {_fmt_cyp2d6(male_bam)} | {_fmt_cyp2d6(fem_bam)} |",
+            f"| **Celiac HLA (*HLA-DQ2/DQ8*)** | {_fmt_hla_trait(male_bam, 'Celiac')} | {_fmt_hla_trait(fem_bam, 'Celiac')} |",
+            f"| ***HLA-B27*** | {_fmt_hla_trait(male_bam, 'HLA-B27')} | {_fmt_hla_trait(fem_bam, 'HLA-B27')} |",
+            "",
+            "_Celiac HLA and HLA-B27 are risk associations, not diagnoses; both matter most when absent "
+            "(absent DQ2/DQ8 makes celiac disease very unlikely). Details: each `bam_blind_spots_report.md`, section 7._",
             "",
             "### Still Unscreened by Short-Read 30x WGS (Recommend Clinical Carrier Panel)",
             "- **Alpha-Thalassemia (*HBA1/HBA2*):** Common 3.7 kb / 4.2 kb deletions — clinical test recommended for **both partners**.",

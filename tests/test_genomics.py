@@ -17,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.api_client import CachedAnnotationClient, format_af
 from lib.constants import ACMG_SF_GENES, TARGETED_MARKERS
+from lib.hla_traits import interpret_hla_associations
 from lib.pgx import (
     interpret_cyp2d6_cyrius,
     interpret_hla_typing,
@@ -530,6 +531,83 @@ def test_hla_tied_candidates_and_low_quality(tmp_path: Path) -> None:
     # Results saved before qualities existed still interpret
     old = interpret_hla_typing({"status": "OK", "genotypes": parsed["genotypes"]})
     assert {e["gene"]: e for e in old}["HLA-B"]["tier"] == "ACTIONABLE"
+
+
+def _hla(genotypes: dict[str, list[str]], qualities: dict[str, list[float]] | None = None) -> dict:
+    return {"status": "OK", "genotypes": genotypes, "qualities": qualities or {}}
+
+
+def test_celiac_hla_dq2_dq8() -> None:
+    by_trait = lambda h: {e["trait"].split(" ")[0]: e for e in interpret_hla_associations(h)}  # noqa: E731
+
+    # DQ2.5 in trans (alpha and beta chains on different haplotypes) still counts
+    dq25 = by_trait(_hla({"HLA-DQA1": ["DQA1*05:05", "DQA1*02:01"], "HLA-DQB1": ["DQB1*02:01", "DQB1*04:02"], "HLA-B": ["B*44:02", "B*13:02"]}))
+    assert dq25["Celiac"]["tier"] == "PRESENT"
+    assert dq25["Celiac"]["result"] == "Carries DQ2.5"
+    assert "highest-risk" not in dq25["Celiac"]["meaning"]
+
+    # Two DQB1*02 copies (homozygous call, or DQ2.5 with DQ2.2) get the dose note
+    homo = by_trait(_hla({"HLA-DQA1": ["DQA1*05:01"], "HLA-DQB1": ["DQB1*02:01"]}))
+    assert homo["Celiac"]["result"] == "Carries DQ2.5 (two DQB1*02 copies)"
+    assert "highest-risk" in homo["Celiac"]["meaning"]
+    both = by_trait(_hla({"HLA-DQA1": ["DQA1*05:01", "DQA1*02:01"], "HLA-DQB1": ["DQB1*02:01", "DQB1*02:02"]}))
+    assert both["Celiac"]["result"] == "Carries DQ2.5, DQ2.2 (two DQB1*02 copies)"
+
+    dq8 = by_trait(_hla({"HLA-DQA1": ["DQA1*03:01"], "HLA-DQB1": ["DQB1*03:02", "DQB1*06:02"]}))
+    assert dq8["Celiac"]["result"] == "Carries DQ8"
+    assert "DQA1*03:01/DQA1*03:01" in dq8["Celiac"]["genotype"]  # homozygous shown twice
+
+    half = by_trait(_hla({"HLA-DQA1": ["DQA1*01:03", "DQA1*01:02"], "HLA-DQB1": ["DQB1*02:02", "DQB1*06:02"]}))
+    assert half["Celiac"]["tier"] == "PARTIAL"
+    assert "DQB1*02" in half["Celiac"]["result"]
+
+    none = by_trait(_hla({"HLA-DQA1": ["DQA1*01:03", "DQA1*01:02"], "HLA-DQB1": ["DQB1*06:03", "DQB1*06:02"]}))
+    assert none["Celiac"]["tier"] == "ABSENT"
+    assert "very unlikely" in none["Celiac"]["meaning"]
+    assert "Low-confidence" not in none["Celiac"]["meaning"]
+
+    # A risk chain inside a tie must not read as absent
+    tied = by_trait(_hla({"HLA-DQA1": ["DQA1*05:01", "DQA1*01:02"], "HLA-DQB1": ["DQB1*02:01,DQB1*06:02", "DQB1*06:03"]}))
+    assert tied["Celiac"]["tier"] == "PRESENT"
+    assert "possible DQ2.5 (tied call)" in tied["Celiac"]["result"]
+
+    # Low quality keeps the result but flags it
+    low = by_trait(_hla(
+        {"HLA-DQA1": ["DQA1*01:03", "DQA1*01:02"], "HLA-DQB1": ["DQB1*06:03", "DQB1*06:02"]},
+        {"HLA-DQA1": [30.0, 30.0], "HLA-DQB1": [30.0, 2.0]},
+    ))
+    assert low["Celiac"]["tier"] == "ABSENT"
+    assert "DQB1*06:02?" in low["Celiac"]["genotype"]
+    assert "Low-confidence call for DQB1*06:02" in low["Celiac"]["meaning"]
+
+    untyped = by_trait(_hla({"HLA-DQA1": ["DQA1*05:01"], "HLA-DQB1": []}))
+    assert untyped["Celiac"]["tier"] == "INCOMPLETE"
+    assert interpret_hla_associations({"status": "TOOL_NOT_FOUND"}) == []
+
+
+def test_hla_b27() -> None:
+    def b27(alleles: list[str]) -> dict:
+        return interpret_hla_associations(_hla({"HLA-B": alleles, "HLA-DQA1": [], "HLA-DQB1": []}))[1]
+
+    assert b27(["B*27:05", "B*44:02"])["tier"] == "PRESENT"
+    assert b27(["B*27:05", "B*44:02"])["result"] == "HLA-B27 positive: B*27:05"
+    assert b27(["B*27:06", "B*44:02"])["tier"] == "PARTIAL"
+    assert b27(["B*44:02", "B*15:01"])["tier"] == "ABSENT"
+    tied = b27(["B*44:02", "B*27:05,B*27:06"])
+    assert tied["tier"] == "PRESENT"
+    assert "possible B*27:05 (tied call)" in tied["result"]
+    assert b27([])["tier"] == "INCOMPLETE"
+
+
+def test_bam_report_shows_hla_associations(tmp_path: Path) -> None:
+    step10 = _load_script_module("10_bam_blind_spots.py", "step10_hla_assoc_mod")
+    hla = _hla({"HLA-A": ["A*01:01", "A*02:01"], "HLA-B": ["B*27:05", "B*44:02"],
+                "HLA-DQA1": ["DQA1*05:01", "DQA1*01:02"], "HLA-DQB1": ["DQB1*02:01", "DQB1*06:02"]})
+    md = step10.render_bam_report("t", tmp_path / "t.bam", {}, {}, {}, [], [], hla)
+    assert "## 7. HLA Disease Associations" in md
+    assert "Carries DQ2.5" in md
+    assert "HLA-B27 positive" in md
+    assert "needs T1K HLA typing" in step10.render_bam_report("t", tmp_path / "t.bam", {}, {}, {}, [], [], None)
 
 
 def test_t1k_space_free_alignment_links(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 # Personal 30x WGS Bioinformatics Workspace
 
-Reproducible local workspace for annual personal & couple carrier screening, ACMG SF v3.3 actionable variant analysis, and pharmacogenomics (CPIC genes including *G6PD*, *MT-RNR1*, and BAM-based *CYP2D6* and HLA typing) on 30x Whole Genome Sequencing (GRCh38) data, with BAM/CRAM alignment support.
+Reproducible local workspace for annual personal & couple carrier screening, ACMG SF v3.3 actionable variant analysis, and pharmacogenomics (CPIC genes including *G6PD*, *MT-RNR1*, and BAM-based *CYP2D6* and HLA typing), plus HLA disease associations (celiac HLA-DQ2/DQ8, HLA-B27), on 30x Whole Genome Sequencing (GRCh38) data, with BAM/CRAM alignment support.
 
 ## Quick Start: Annual Checkup (WSL2 Ubuntu)
 

@@ -186,25 +186,33 @@ def normalize_hla_allele(allele: str | None) -> str | None:
     return f"{gene}*{parts[0]}:{second}"
 
 
+def hla_slots(hla: dict[str, Any], gene: str) -> list[tuple[list[str], float | None]]:
+    """Return one (candidates, quality) pair per called T1K allele of a gene.
+
+    A slot holds one normalized two-field allele, or several when T1K could not separate
+    tied candidates. Quality is None for results saved before qualities were recorded.
+    """
+    genotypes: dict[str, list[str]] = hla.get("genotypes") or {}
+    gene_q = (hla.get("qualities") or {}).get(gene) or []
+    slots: list[tuple[list[str], float | None]] = []
+    for i, raw in enumerate(genotypes.get(gene, [])):
+        cands: list[str] = []
+        for c in str(raw).split(","):
+            n = normalize_hla_allele(c)
+            if n and n not in cands:
+                cands.append(n)
+        if cands:
+            slots.append((cands, gene_q[i] if i < len(gene_q) else None))
+    return slots
+
+
 def interpret_hla_typing(hla: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Map BAM-based HLA-A / HLA-B typing (T1K) to CPIC hypersensitivity risk entries."""
     if not hla or hla.get("status") != "OK":
         return []
-    genotypes: dict[str, list[str]] = hla.get("genotypes") or {}
-    qualities: dict[str, list[float]] = hla.get("qualities") or {}
     entries: list[dict[str, Any]] = []
     for gene in HLA_PGX_GENES:
-        # Each slot is one called allele, or a comma-separated list of candidates T1K could not separate.
-        slots: list[tuple[list[str], float | None]] = []
-        gene_q = qualities.get(gene) or []
-        for i, raw in enumerate(genotypes.get(gene, [])):
-            cands: list[str] = []
-            for c in str(raw).split(","):
-                n = normalize_hla_allele(c)
-                if n and n not in cands:
-                    cands.append(n)
-            if cands:
-                slots.append((cands, gene_q[i] if i < len(gene_q) else None))
+        slots = hla_slots(hla, gene)
         gene_drugs = ", ".join(sorted({d for k, (d, _) in CPIC_HLA_RISK_ALLELES.items() if k.startswith(gene + "*")}))
         if not slots:
             entries.append({
