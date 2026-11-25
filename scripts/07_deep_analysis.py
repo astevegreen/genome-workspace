@@ -45,6 +45,7 @@ from lib.genomics import (
     record_effective_min_dp,
     record_is_pass,
 )
+from lib.identity import load_bam_results
 from lib.pgx import interpret_pgx_profile, render_pgx_medication_card
 
 REPO_ROOT = SCRIPT_DIR.parent
@@ -441,18 +442,16 @@ def main() -> None:
     pd.DataFrame(marker_rows).to_csv(
         reports_dir / "targeted_markers.tsv", sep="\t", index=False
     )
-    cyrius_cyp2d6 = None
-    hla_t1k = None
-    bam_json_path = reports_dir / "bam_blind_spots.json"
-    if bam_json_path.exists():
-        try:
-            bam_payload = json.loads(bam_json_path.read_text(encoding="utf-8"))
-            cyrius_cyp2d6 = bam_payload.get("cyrius_cyp2d6")
-            hla_t1k = bam_payload.get("hla_t1k")
-        except (OSError, json.JSONDecodeError):
-            pass
+    # Step 10 BAM calls, unless the Step 3 identity QC failed for this sample
+    bam_payload = load_bam_results(reports_dir) or {}
     sex = read_sample_sex(REPO_ROOT / "config" / "samples.tsv", args.sample)
-    pgx_entries = interpret_pgx_profile(marker_rows, cyrius_cyp2d6=cyrius_cyp2d6, sex=sex, hla=hla_t1k)
+    pgx_entries = interpret_pgx_profile(
+        marker_rows,
+        cyrius_cyp2d6=bam_payload.get("cyrius_cyp2d6"),
+        sex=sex,
+        hla=bam_payload.get("hla_t1k"),
+        ugt1a1_ta=bam_payload.get("ugt1a1_ta_repeat"),
+    )
     pgx_card_md = render_pgx_medication_card(args.sample, ref_meta, pgx_entries)
     pgx_card_path = reports_dir / "pgx_medication_card.md"
     pgx_card_path.write_text(pgx_card_md, encoding="utf-8")

@@ -39,6 +39,7 @@ from lib.genomics import (
     is_strong_conflicting,
     load_gencode_cds,
 )
+from lib.identity import load_bam_results
 
 REPO_ROOT = SCRIPT_DIR.parent
 REFERENCE_DIR = REPO_ROOT / "data" / "reference"
@@ -185,13 +186,8 @@ def scan_partner_gene_for_rare_coding_variants(
 
 
 def _load_bam_summary(rep_dir: Path) -> dict[str, Any] | None:
-    p = rep_dir / "bam_blind_spots.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    """Step 10 results, or None if absent or the Step 3 identity QC failed for this sample."""
+    return load_bam_results(rep_dir)
 
 
 def _sv_bam_verdict_by_gene(bam_data: dict[str, Any] | None) -> dict[str, list[str]]:

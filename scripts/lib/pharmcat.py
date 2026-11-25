@@ -16,6 +16,7 @@ from typing import Any
 import pysam
 
 from lib.pgx import hla_slots
+from lib.ugt1a1 import UGT1A1_CHROM, UGT1A1_TA_POS, counts_label
 
 REF_BLOCK_MIN_DP = 10  # same 10x floor the card uses for G6PD reference calls
 HEMIZYGOUS_MIN_DP = 6  # male non-PAR chrX: one copy, so half the depth (Step 4 HEMI threshold)
@@ -322,10 +323,52 @@ def _vkorc1_alt_count(text: str | None, pharmcat: bool) -> int | None:
     return None if not m else sum(1 for a in m.groups() if a == "T")
 
 
+def describe_input_at(vcf_path: Path, chrom: str = UGT1A1_CHROM, pos: int = UGT1A1_TA_POS) -> str:
+    """What the PharmCAT input VCF says at one position (the UGT1A1 TA repeat by default)."""
+    with pysam.VariantFile(str(vcf_path)) as vf:
+        contig = _sample_contig(f"chr{chrom}", set(vf.header.contigs))
+        if contig is None:
+            return "no call"
+        for r in vf.fetch(contig, pos - 1, pos):
+            if r.pos != pos:
+                continue
+            gt = r.samples[0].get("GT") or ()
+            if gt and all(a == 0 for a in gt):
+                return "0/0 from a gVCF reference block"
+            return "a VCF variant call (" + "/".join("." if a is None else str(a) for a in gt) + ")"
+    return "no call"
+
+
+def _ugt1a1_note(card_row: dict[str, Any], status: str, ugt1a1_ta: dict[str, Any] | None, pc_input: str | None) -> str:
+    """Explain what each side's UGT1A1 *28 status rests on."""
+    ta = ugt1a1_ta or {}
+    basis = f"PharmCAT's *28 position (rs3064744) is {pc_input}" if pc_input else ""
+    if basis and pc_input.startswith("0/0"):
+        basis += ", which does not measure the repeat length"
+    if str(card_row.get("source") or "") == "BAM_TA_REPEAT":
+        note = f"Card: TA repeat counted from {ta.get('spanning_fragments', '?')} BAM read pairs ({counts_label(ta.get('counts'))})."
+        if status == "DISAGREE":
+            note += " The read count measures the repeat directly; trust it over PharmCAT here."
+    elif "counts" in ta:
+        note = (f"Card: BAM TA-repeat count made no call ({counts_label(ta.get('counts')) or 'no spanning reads'}), "
+                "so *28 stays unresolved.")
+    else:
+        note = "Card: no BAM TA-repeat count (Step 10 not run)."
+    return " ".join(b for b in (note, basis + "." if basis else "") if b)
+
+
 def compare_card_with_pharmcat(
-    card_rows: list[dict[str, Any]], pc_rows: dict[str, dict[str, str]], outside_calls: dict[str, str]
+    card_rows: list[dict[str, Any]],
+    pc_rows: dict[str, dict[str, str]],
+    outside_calls: dict[str, str],
+    ugt1a1_ta: dict[str, Any] | None = None,
+    ugt1a1_pharmcat_input: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One row per gene: card result, PharmCAT result, and a status."""
+    """One row per gene: card result, PharmCAT result, and a status.
+
+    For UGT1A1 the note says what each side rests on: the card's BAM TA-repeat read count (Step 10) and
+    what PharmCAT's input VCF held at the repeat (`ugt1a1_pharmcat_input`, from describe_input_at).
+    """
     card = {str(r["gene"]): r for r in card_rows}
     out: list[dict[str, Any]] = []
     for gene in sorted(set(card) | set(pc_rows)):
@@ -376,6 +419,8 @@ def compare_card_with_pharmcat(
             else:
                 a, b = _stars(row["card_diplotype"]), _stars(row["pharmcat_diplotype"])
                 row["status"] = "DIPLOTYPE_DIFFERS" if a and b and a != b else "AGREE"
+        if gene == "UGT1A1" and c is not None and p is not None:
+            row["note"] = _ugt1a1_note(c, row["status"], ugt1a1_ta, ugt1a1_pharmcat_input)
         if row["status"] == "PHARMCAT_NO_CALL" and " OR " in row["pharmcat_diplotype"]:
             row["note"] = (row["note"] + " PharmCAT found more than one possible diplotype.").strip()
         out.append(row)
