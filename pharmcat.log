@@ -1,0 +1,15 @@
+2026-11-25 07:02:09,932 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:02:11,416 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:02:11,997 INFO o.p.p.p.Phenotyper [Phenotyper.java:173] Writing Phenotyper JSON to /mnt/c/Antigravity/Genome/data/processed/steve/pharmcat/out/steve.phenotype.json
+2026-11-25 07:05:02,794 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:04,323 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:04,952 INFO o.p.p.p.Phenotyper [Phenotyper.java:173] Writing Phenotyper JSON to /mnt/c/Antigravity/Genome/data/processed/steve/pharmcat/out/steve.phenotype.json
+2026-11-25 07:05:09,973 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:11,433 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:11,958 INFO o.p.p.p.Phenotyper [Phenotyper.java:173] Writing Phenotyper JSON to /mnt/c/Antigravity/Genome/data/processed/annie/pharmcat/out/annie.phenotype.json
+2026-11-25 07:05:54,233 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:55,910 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:05:56,569 INFO o.p.p.p.Phenotyper [Phenotyper.java:173] Writing Phenotyper JSON to /mnt/c/Antigravity/Genome/data/processed/steve/pharmcat/out/steve.phenotype.json
+2026-11-25 07:06:02,843 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:06:05,610 WARN o.p.p.v.VcfParser [VcfParser.java:109] There are 1 samples in the header but 0 in the metadata
+2026-11-25 07:06:07,917 INFO o.p.p.p.Phenotyper [Phenotyper.java:173] Writing Phenotyper JSON to /mnt/c/Antigravity/Genome/data/processed/annie/pharmcat/out/annie.phenotype.json
