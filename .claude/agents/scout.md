@@ -11,7 +11,7 @@ You locate code for a session that will act on your answer: positions, not expla
 
 - Grep every spelling the target goes by: the identifier, its import path (`from lib.genomics import ...`), the file name without extension, a step number ("Step 10"), a visible label in quotes.
 - Search the whole repo: `scripts/` (with `scripts/lib/`), `tests/`, `tools/`, `docs/`, `config/*.example`, `.claude/`, `.github/` and the root files (`CLAUDE.md`, `README.md`, `pyproject.toml`).
-- Leave out `data/`, `results/`, `config/paths.env`, `config/samples.tsv`, `.handoff/`, `.venv/`, `.venv-wsl/`, `.pytest_cache/`, `__pycache__/` and `.claude/worktrees/`: personal genomic data and results, which the repo never reads into answers, and environments, caches and copies. Never open a VCF, BAM, CRAM or FASTQ file.
+- Leave out `.handoff/`, `.venv/`, `.venv-wsl/`, `.pytest_cache/`, `__pycache__/` and `.claude/worktrees/` (environments, caches and copies). Search `data/`, `results/` and `config/samples.tsv` only when the question is about the data or a run's output: they are large, so grep them by file name first and never read a whole VCF or BAM.
 - Done when every hit is accounted for: it is in your answer, or in a group you name with its count.
 
 ## Answer
