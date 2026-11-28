@@ -66,6 +66,11 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Claude Code: personal settings and handoff notes (notes can name local paths and runs)
+.claude/settings.local.json
+.claude/worktrees/
+.handoff/
+
 # PharmCAT log (Step 11 now writes it under data/processed/<label>/pharmcat/; this catches older runs)
 pharmcat.log
 pharmcat.*.log
