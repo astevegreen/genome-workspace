@@ -1,3 +1,9 @@
+# Weekly version updates as pull requests, which run ci.yml before anything merges. Minor and patch
+# updates come grouped, one pull request per ecosystem; a major version comes on its own. A release
+# waits 7 days first, so a broken or hijacked release is usually pulled before it reaches us.
+# Security updates are separate (Dependabot alerts) and skip the wait, but GitHub raises no alert
+# for an action pinned by commit SHA, as ci.yml pins astral-sh/setup-uv: its security fixes arrive
+# with the weekly version updates.
 version: 2
 updates:
   - package-ecosystem: "uv"
@@ -5,9 +11,21 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      uv-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
